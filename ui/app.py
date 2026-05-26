@@ -444,23 +444,61 @@ elif page == "📈 Results":
         st.info("No eval results found. Run `python eval/run_eval.py` first.")
     else:
         df = pd.DataFrame(results)
-        # Parse / normalise columns
-        df["_ts_dt"] = pd.to_datetime(df["_timestamp"], errors="coerce")
 
-        # Filters
+        _MODEL_COL = "most_used_model"
+        _COST_COL = "total_cost_usd"
+        _TOKEN_COL = "total_tokens"
+        _CASE_COL = "case_id"
+        _ITER_COL = "iterations_used"
+        _PASSED_COL = "passed"
+        _TS_COL = "_timestamp"
+        _TS_DT_COL = "_ts_dt"
+
+        expected_cols = [
+            _TS_COL,
+            _MODEL_COL,
+            _COST_COL,
+            _CASE_COL,
+            _ITER_COL,
+            _PASSED_COL,
+        ]
+        missing = [c for c in expected_cols if c not in df.columns]
+        if missing or df.empty:
+            st.warning(
+                f"Eval result data is incomplete or empty. "
+                f"Missing columns: {', '.join(missing) if missing else 'none'}. "
+                "Displaying available data."
+            )
+            for col in [_TS_COL, _MODEL_COL]:
+                if col not in df.columns:
+                    df[col] = ""
+            for col in [_COST_COL, _TOKEN_COL, _ITER_COL]:
+                if col not in df.columns:
+                    df[col] = 0.0
+            if _PASSED_COL not in df.columns:
+                df[_PASSED_COL] = False
+            if _CASE_COL not in df.columns:
+                df[_CASE_COL] = "unknown"
+            if _TS_DT_COL not in df.columns:
+                df[_TS_DT_COL] = pd.Timestamp.now()
+
+        if _TS_COL in df.columns:
+            df[_TS_DT_COL] = pd.to_datetime(df[_TS_COL], errors="coerce")
+
+        model_options = (
+            sorted(df[_MODEL_COL].dropna().unique()) if _MODEL_COL in df.columns else []
+        )
+
         col_f1, col_f2, col_f3, col_f4 = st.columns(4)
         with col_f1:
-            model_filter = st.multiselect(
-                "Model",
-                options=sorted(df["most_used_model"].dropna().unique()),
-            )
+            model_filter = st.multiselect("Model", options=model_options)
         with col_f2:
-            status_filter = st.multiselect(
-                "Status",
-                options=["PASS", "FAIL"],
-            )
+            status_filter = st.multiselect("Status", options=["PASS", "FAIL"])
         with col_f3:
-            model_filter = model_filter or df["most_used_model"].dropna().unique()
+            if not model_filter and model_options:
+                model_filter = model_options
+            else:
+                model_filter = model_filter or model_options
             status_filter = status_filter or ["PASS", "FAIL"]
         with col_f4:
             sort_by = st.selectbox(
@@ -469,57 +507,62 @@ elif page == "📈 Results":
                 index=0,
             )
 
-        filtered = df[
-            df["most_used_model"].isin(model_filter)
-            & df["passed"].isin([s == "PASS" for s in status_filter])
-        ].copy()
+        filtered = df.copy()
+        if _MODEL_COL in filtered.columns and model_filter:
+            filtered = filtered[filtered[_MODEL_COL].isin(model_filter)]
+        if _PASSED_COL in filtered.columns:
+            boolean_status = [s == "PASS" for s in status_filter]
+            filtered = filtered[filtered[_PASSED_COL].isin(boolean_status)]
 
         sort_map = {
-            "timestamp": "_ts_dt",
-            "cost": "total_cost_usd",
-            "iterations": "iterations_used",
-            "tokens": "total_tokens",
+            "timestamp": _TS_DT_COL,
+            "cost": _COST_COL,
+            "iterations": _ITER_COL,
+            "tokens": _TOKEN_COL,
         }
-        filtered = filtered.sort_values(
-            sort_map.get(sort_by, "_ts_dt"), ascending=False
-        )
+        sort_key = sort_map.get(sort_by, _TS_DT_COL)
+        if sort_key in filtered.columns:
+            filtered = filtered.sort_values(sort_key, ascending=False)
 
-        # Display table
         display_cols = [
-            "case_id",
-            "passed",
-            "iterations_used",
+            _CASE_COL,
+            _PASSED_COL,
+            _ITER_COL,
             "model_used",
-            "total_cost_usd",
-            "total_tokens",
+            _COST_COL,
+            _TOKEN_COL,
             "verification_attempts",
             "circuit_events",
             "branch_name",
             "_file",
         ]
         available = [c for c in display_cols if c in filtered.columns]
-        st.dataframe(
-            filtered[available],
-            use_container_width=True,
-            column_config={
-                "passed": st.column_config.CheckboxColumn("Passed"),
-                "total_cost_usd": st.column_config.NumberColumn("Cost", format="$%.4f"),
-                "total_tokens": st.column_config.NumberColumn("Tokens", format="%d"),
-                "circuit_events": st.column_config.NumberColumn("CE"),
-                "branch_name": st.column_config.TextColumn("Branch"),
-            },
-            hide_index=True,
-        )
+        if not filtered.empty and available:
+            st.dataframe(
+                filtered[available],
+                use_container_width=True,
+                column_config={
+                    _PASSED_COL: st.column_config.CheckboxColumn("Passed"),
+                    _COST_COL: st.column_config.NumberColumn("Cost", format="$%.4f"),
+                    _TOKEN_COL: st.column_config.NumberColumn("Tokens", format="%d"),
+                    "circuit_events": st.column_config.NumberColumn("CE"),
+                    "branch_name": st.column_config.TextColumn("Branch"),
+                },
+                hide_index=True,
+            )
+        else:
+            st.info("No matching results to display.")
 
-        # Charts
         st.subheader("Charts")
         tab1, tab2, tab3, tab4 = st.tabs(
             ["Success Rate", "Cost per Run", "Model Usage", "Iterations vs Success"]
         )
 
         with tab1:
-            if len(filtered) > 1:
-                success_rate = filtered["passed"].rolling(5, min_periods=1).mean() * 100
+            if len(filtered) > 1 and _PASSED_COL in filtered.columns:
+                success_rate = (
+                    filtered[_PASSED_COL].rolling(5, min_periods=1).mean() * 100
+                )
                 fig = px.line(
                     y=success_rate,
                     title="Success Rate (rolling avg, last 5 runs)",
@@ -531,18 +574,22 @@ elif page == "📈 Results":
                 st.info("Need at least 2 data points for chart.")
 
         with tab2:
-            if len(filtered) > 0:
+            if (
+                not filtered.empty
+                and _COST_COL in filtered.columns
+                and _CASE_COL in filtered.columns
+            ):
                 fig = cost_bar_chart(
-                    filtered["total_cost_usd"].tolist(),
-                    filtered["case_id"].tolist(),
+                    filtered[_COST_COL].tolist(),
+                    filtered[_CASE_COL].tolist(),
                 )
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No data.")
 
         with tab3:
-            if len(filtered) > 0:
-                usage = filtered["most_used_model"].value_counts()
+            if not filtered.empty and _MODEL_COL in filtered.columns:
+                usage = filtered[_MODEL_COL].value_counts()
                 fig = px.pie(
                     values=usage.values,
                     names=usage.index,
@@ -553,18 +600,22 @@ elif page == "📈 Results":
                 st.info("No data.")
 
         with tab4:
-            if len(filtered) > 1:
+            if (
+                len(filtered) > 1
+                and _ITER_COL in filtered.columns
+                and _COST_COL in filtered.columns
+            ):
                 fig = px.scatter(
                     filtered,
-                    x="iterations_used",
-                    y="total_cost_usd",
-                    color="passed",
+                    x=_ITER_COL,
+                    y=_COST_COL,
+                    color=_PASSED_COL if _PASSED_COL in filtered.columns else None,
                     title="Iterations vs Cost",
                     labels={
-                        "iterations_used": "Iterations",
-                        "total_cost_usd": "Cost (USD)",
+                        _ITER_COL: "Iterations",
+                        _COST_COL: "Cost (USD)",
                     },
-                    hover_data=["case_id"],
+                    hover_data=[_CASE_COL] if _CASE_COL in filtered.columns else None,
                 )
                 st.plotly_chart(fig, use_container_width=True)
             else:
@@ -613,27 +664,26 @@ elif page == "💰 Costs":
         with col5:
             st.metric("Most Expensive", f"${me_cost:.4f}", me_case)
 
-        # Budget gauge (use last run's budget)
         last_budget = results[-1].get("total_cost_usd", 5.0)
         if last_budget > 0:
             fig = budget_gauge(total_cost, max(total_cost * 1.2, last_budget))
             st.plotly_chart(fig, use_container_width=True)
 
-        # Charts
         tab_c1, tab_c2, tab_c3 = st.tabs(
             ["Run Costs", "By Model", "Cost vs Iterations"]
         )
         with tab_c1:
             df = pd.DataFrame(results)
+            cost_col = "total_cost_usd"
+            case_col = "case_id"
             fig = cost_bar_chart(
-                df["total_cost_usd"].tolist(),
-                df["case_id"].tolist(),
+                df[cost_col].tolist() if cost_col in df.columns else [],
+                df[case_col].tolist() if case_col in df.columns else [],
                 "Cost per Run",
             )
             st.plotly_chart(fig, use_container_width=True)
 
         with tab_c2:
-            df = pd.DataFrame(results)
             model_breakdown: Dict[str, dict] = {}
             for r in results:
                 m = r.get("most_used_model", "unknown")
@@ -650,20 +700,20 @@ elif page == "💰 Costs":
         with tab_c3:
             if len(results) > 1:
                 df = pd.DataFrame(results)
-                fig = px.scatter(
-                    df,
-                    x="total_cost_usd",
-                    y="iterations_used",
-                    color="passed",
-                    hover_data=["case_id"],
-                    labels={
-                        "total_cost_usd": "Cost (USD)",
-                        "iterations_used": "Iterations",
-                    },
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                x_col = "total_cost_usd"
+                y_col = "iterations_used"
+                c_col = "passed"
+                if x_col in df.columns and y_col in df.columns:
+                    fig = px.scatter(
+                        df,
+                        x=x_col,
+                        y=y_col,
+                        color=c_col if c_col in df.columns else None,
+                        hover_data=["case_id"] if "case_id" in df.columns else None,
+                        labels={x_col: "Cost (USD)", y_col: "Iterations"},
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
-        # Export
         if st.button("📥 Download Cost Data as CSV", use_container_width=True):
             df = pd.DataFrame(results)
             export_cols = [
@@ -792,14 +842,45 @@ elif page == "🔧 System Status":
 
     # ---- Docker Sandbox ----
     st.subheader("🐳 Docker Sandbox")
-    try:
-        import docker
 
-        client = docker.from_env()
-        containers = client.containers.list(
-            filters={"label": "role=auto-swe-agent-sandbox"},
-            all=True,
-        )
+    def _check_docker_sandbox() -> None:
+        try:
+            import docker
+
+            client = docker.from_env()
+        except (docker.errors.DockerException, FileNotFoundError, ImportError) as e:
+            st.markdown(
+                f'<div style="border:1px solid #f59e0b40;border-radius:8px;'
+                f'background:#fef3c715;padding:16px">'
+                f'<div style="font-size:14px;font-weight:600;color:#d97706">'
+                f"🐳 Runtime: Container Sandbox Interface Mode</div>"
+                f'<div style="font-size:13px;color:#92400e;margin-top:4px">'
+                f"Fallback to isolated local shell context due to environment "
+                f"security constraints. Docker socket unreachable: {e}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            return
+
+        try:
+            containers = client.containers.list(
+                filters={"label": "role=auto-swe-agent-sandbox"},
+                all=True,
+            )
+        except Exception as e:
+            st.markdown(
+                f'<div style="border:1px solid #f59e0b40;border-radius:8px;'
+                f'background:#fef3c715;padding:16px">'
+                f'<div style="font-size:14px;font-weight:600;color:#d97706">'
+                f"🐳 Runtime: Container Sandbox Interface Mode</div>"
+                f'<div style="font-size:13px;color:#92400e;margin-top:4px">'
+                f"Fallback to isolated local shell context due to environment "
+                f"security constraints. Sandbox query failed: {e}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            return
+
         if containers:
             for c in containers:
                 status_icon = "🟢" if c.status == "running" else "🔴"
@@ -808,6 +889,6 @@ elif page == "🔧 System Status":
                     f"(created {c.attrs.get('Created', '?')[:19]})"
                 )
         else:
-            st.info("No sandbox containers found.")
-    except Exception as exc:
-        st.warning(f"Cannot connect to Docker: {exc}")
+            st.info("No sandbox containers found. Start an agent run to create one.")
+
+    _check_docker_sandbox()
