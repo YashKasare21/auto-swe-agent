@@ -36,8 +36,15 @@ Built on **LangGraph** for stateful agent orchestration, **LiteLLM** for dynamic
 
 The orchestration pipeline implements a **human-like division of labor** across four specialized LLM agents coordinated through a LangGraph state machine. Each agent operates with a distinct model tier and system prompt, mirroring the software engineering workflow of analysis → planning → implementation → review.
 
-![Multi-Agent Workflow](assets/architecture.png)
+<img src="assets/architecture.png" alt="Multi-Agent Workflow" width="800"/>
 *Figure 1: LangGraph state machine topology — 7-node multi-agent orchestration pipeline with conditional routing, verification loops, and review-based gates.*
+
+<details>
+<summary>🖼️ View simplified vector diagram</summary>
+
+![Architecture (SVG)](assets/architecture.svg)
+
+</details>
 
 ### Pipeline Topology
 
@@ -151,7 +158,7 @@ All operational commands execute inside a **Docker sandbox** to prevent host con
 
 ### Sandbox Architecture
 
-![Docker Sandbox Isolation](assets/sandbox.png)
+<img src="assets/sandbox.png" alt="Docker Sandbox Isolation" width="700"/>
 *Figure 2: Docker-based execution isolation — workspace directory volume-mounted into a python:3.11-slim container. All tool execution, test runs, and git operations occur inside the sandbox.*
 
 ```
