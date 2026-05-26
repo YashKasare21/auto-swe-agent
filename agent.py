@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Annotated, Optional, TypedDict
 
 import docker
@@ -121,7 +122,11 @@ def run_tests(workspace_dir: str = "./") -> str:
     return output[:2000] + "\n[TRUNCATED]" if len(output) > 2000 else output
 
 
-tools = [list_files, read_file, search_codebase, write_to_file, run_bash_command, run_tests]
+# Git tools (run inside Docker sandbox)
+from tools.git_tools import create_branch, commit_changes, generate_pr_description
+
+tools = [list_files, read_file, search_codebase, write_to_file, run_bash_command, run_tests,
+         create_branch, commit_changes, generate_pr_description]
 
 FALLBACK_MODELS = [
     "gemini/gemini-2.0-flash",
@@ -149,7 +154,9 @@ SYSTEM = SystemMessage(content=(
     "You are an autonomous software engineer. Use list_files, read_file, and search_codebase "
     "to explore the codebase, then use write_to_file to implement fixes, and run_bash_command "
     "to run tests and verify your changes. You can also call run_tests at any time to check "
-    "test status. Do not just plan — actually implement and verify the fix. "
+    "test status. Once tests pass, you can use create_branch, commit_changes, and "
+    "generate_pr_description to commit your work like a real developer. "
+    "Do not just plan — actually implement and verify the fix. "
     "When tests pass, state that the task is complete."
 ))
 
@@ -167,6 +174,9 @@ class GraphState(TypedDict):
     tests_passed: Optional[bool]       # None=not yet run, True=pass, False=fail
     test_output: Optional[str]         # stdout/stderr from last pytest run
     verification_attempts: int         # number of fix retries so far
+    # --- git workflow fields ---
+    branch_name: Optional[str]         # branch created by git_workflow node
+    commit_hash: Optional[str]         # commit hash from git_workflow node
 
 
 def planner_node(state: GraphState) -> dict:
@@ -252,6 +262,54 @@ def verify_code(state: GraphState) -> dict:
         }
 
 
+def git_workflow(state: GraphState) -> dict:
+    """Auto-create a branch and commit all changes after tests pass."""
+    print("\n--- [NODE] GIT WORKFLOW ---")
+    workspace = state.get("workspace_dir", "./")
+    timestamp = int(time.time())
+    branch = f"auto-swe/fix-{timestamp}"
+
+    # Ensure git identity is configured inside container
+    from tools.git_tools import _run_in_sandbox
+    _run_in_sandbox(
+        'git config user.email "agent@auto-swe-agent" && git config user.name "auto-swe-agent"',
+        workspace,
+    )
+
+    # Check if this is a git repo
+    exit_code, _ = _run_in_sandbox("git rev-parse --is-inside-work-tree", workspace)
+    if exit_code != 0:
+        print("[GIT] Not a git repo — skipping git workflow.")
+        return {"branch_name": None, "commit_hash": None}
+
+    # Create branch
+    exit_code, out = _run_in_sandbox(f"git checkout -b {branch}", workspace)
+    if exit_code != 0:
+        print(f"[GIT] Branch creation failed: {out}")
+        return {"branch_name": None, "commit_hash": None}
+    print(f"[GIT] Created branch: {branch}")
+
+    # Commit all changes
+    task_slug = state.get("current_task", "fix")[:50].strip()
+    commit_msg = f"auto-swe: {task_slug}"
+    _run_in_sandbox("git add -A", workspace)
+    exit_code, out = _run_in_sandbox(f'git commit -m "{commit_msg}"', workspace)
+    if exit_code != 0:
+        print(f"[GIT] Commit failed: {out}")
+        return {"branch_name": branch, "commit_hash": None}
+
+    # Parse commit hash
+    commit_hash = ""
+    for line in out.splitlines():
+        if line.startswith("["):
+            parts = line.split()
+            if len(parts) >= 2:
+                commit_hash = parts[1].rstrip("]")
+            break
+    print(f"[GIT] Committed: {commit_hash} — {commit_msg}")
+    return {"branch_name": branch, "commit_hash": commit_hash}
+
+
 MULTI_FILE_KEYWORDS = ("3 files", "multiple files", "several files", "all files")
 
 NO_WRITE_MSG = SystemMessage(content=(
@@ -287,9 +345,9 @@ def route_planner(state: GraphState) -> str:
 
 
 def route_verify(state: GraphState) -> str:
-    """Route after verify_code: back to planner on failure (up to 3 attempts), else end."""
+    """Route after verify_code: git_workflow on pass, planner on failure (max 3), else end."""
     if state.get("tests_passed"):
-        return "end"
+        return "git_workflow"
     if state.get("verification_attempts", 0) < 3:
         return "planner"
     print("[VERIFY] Max verification attempts reached. Ending.")
@@ -301,6 +359,7 @@ workflow = StateGraph(GraphState)
 workflow.add_node("planner", planner_node)
 workflow.add_node("executor", _track_tool_calls)
 workflow.add_node("verify", verify_code)
+workflow.add_node("git_workflow", git_workflow)
 
 workflow.set_entry_point("planner")
 workflow.add_conditional_edges(
@@ -310,8 +369,9 @@ workflow.add_conditional_edges(
 workflow.add_edge("executor", "planner")
 workflow.add_conditional_edges(
     "verify", route_verify,
-    {"planner": "planner", "end": END}
+    {"planner": "planner", "git_workflow": "git_workflow", "end": END}
 )
+workflow.add_edge("git_workflow", END)
 
 app = workflow.compile()
 
@@ -337,15 +397,19 @@ def main():
         "tests_passed": None,
         "test_output": None,
         "verification_attempts": 0,
+        "branch_name": None,
+        "commit_hash": None,
     })
     print("\n=== FINAL ANSWER ===\n")
     content = final_state["messages"][-1].content
     if isinstance(content, list):
         content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
     print(content)
-    # Print verification summary
+    # Print verification and git summary (parsed by eval harness)
     print(f"\n[SUMMARY] tests_passed={final_state.get('tests_passed')} | "
-          f"verification_attempts={final_state.get('verification_attempts', 0)}")
+          f"verification_attempts={final_state.get('verification_attempts', 0)} | "
+          f"branch_name={final_state.get('branch_name')} | "
+          f"commit_hash={final_state.get('commit_hash')}")
 
 
 if __name__ == "__main__":
