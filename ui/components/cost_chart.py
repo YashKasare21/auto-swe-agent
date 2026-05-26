@@ -14,6 +14,9 @@ def cost_bar_chart(
     labels: List[str],
     title: str = "Cost per Run",
 ) -> go.Figure:
+    if not labels or not costs or len(labels) != len(costs):
+        labels = ["No Data Available"]
+        costs = [0.0]
     df = pd.DataFrame({"label": labels, "cost_usd": costs})
     fig = px.bar(
         df,
@@ -67,7 +70,12 @@ def budget_gauge(
     budget: float,
     title: str = "Budget Utilisation",
 ) -> go.Figure:
-    pct = min(current_cost / budget * 100, 100) if budget > 0 else 0
+    if budget <= 0:
+        fig = go.Figure()
+        fig.add_annotation(text="Budget not configured", showarrow=False)
+        fig.update_layout(height=280, margin=dict(l=30, r=30, t=30, b=30))
+        return fig
+    pct = min(current_cost / budget * 100, 100)
     fig = go.Figure(
         go.Indicator(
             mode="gauge+number+delta",
@@ -109,9 +117,16 @@ def model_usage_stacked_bar(
     df = pd.DataFrame(records_list)
     model_cols = [c for c in df.columns if c.startswith("model_cost_")]
     if not model_cols:
+        costs = df.get("total_cost_usd")
+        labels = df.get("case_id")
+        costs_list = costs.tolist() if costs is not None and not costs.empty else []
+        labels_list = labels.tolist() if labels is not None and not labels.empty else []
+        if len(costs_list) != len(labels_list):
+            costs_list = [0.0]
+            labels_list = ["No Data Available"]
         return cost_bar_chart(
-            df.get("total_cost_usd", [0]),
-            df.get("case_id", ["run"]),
+            costs_list,
+            labels_list,
             title,
         )
     fig = px.bar(
