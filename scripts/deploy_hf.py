@@ -48,8 +48,12 @@ def deploy_hf(token: str, repo_id: str, branch: str = "main") -> None:
         src_path = PROJECT_ROOT / src
         dst_path = deploy_dir / src
         if src_path.is_dir():
-            shutil.copytree(src_path, dst_path, dirs_exist_ok=True,
-                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            shutil.copytree(
+                src_path,
+                dst_path,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
         elif src_path.is_file():
             shutil.copy2(src_path, dst_path)
 
@@ -72,20 +76,38 @@ def deploy_hf(token: str, repo_id: str, branch: str = "main") -> None:
     print("[deploy] Initialising git repository")
 
     subprocess.run(["git", "init"], cwd=deploy_dir, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "deploy@auto-swe-agent"],
-                   cwd=deploy_dir, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "auto-swe-agent-deploy"],
-                   cwd=deploy_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "deploy@auto-swe-agent"],
+        cwd=deploy_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "auto-swe-agent-deploy"],
+        cwd=deploy_dir,
+        check=True,
+        capture_output=True,
+    )
 
-    subprocess.run(["git", "add", "-A"], cwd=deploy_dir, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "Deploy auto-swe-agent dashboard"],
-                   cwd=deploy_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "-A"], cwd=deploy_dir, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "Deploy auto-swe-agent dashboard"],
+        cwd=deploy_dir,
+        check=True,
+        capture_output=True,
+    )
 
     hf_url = f"https://huggingface.co/spaces/{repo_id}"
 
     remote_url = f"https://{token}@huggingface.co/spaces/{repo_id}"
-    subprocess.run(["git", "remote", "add", "origin", remote_url],
-                   cwd=deploy_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", remote_url],
+        cwd=deploy_dir,
+        check=True,
+        capture_output=True,
+    )
 
     print(f"[deploy] Pushing to {hf_url}")
 
@@ -125,10 +147,12 @@ def main() -> None:
         description="Deploy auto-swe-agent dashboard to Hugging Face Spaces"
     )
     parser.add_argument("--token", required=True, help="Hugging Face API token")
-    parser.add_argument("--repo-id", required=True,
-                        help="Target Space repo ID, e.g. 'username/auto-swe-agent'")
-    parser.add_argument("--branch", default="main",
-                        help="Space branch (default: main)")
+    parser.add_argument(
+        "--repo-id",
+        required=True,
+        help="Target Space repo ID, e.g. 'username/auto-swe-agent'",
+    )
+    parser.add_argument("--branch", default="main", help="Space branch (default: main)")
     args = parser.parse_args()
 
     deploy_hf(token=args.token, repo_id=args.repo_id, branch=args.branch)
