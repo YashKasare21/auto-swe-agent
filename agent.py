@@ -140,9 +140,10 @@ def run_tests(workspace_dir: str = "./") -> str:
 
 # Git tools (run inside Docker sandbox)
 from tools.git_tools import create_branch, commit_changes, generate_pr_description
+from tools.semantic_search import semantic_search
 
-tools = [list_files, read_file, search_codebase, write_to_file, run_bash_command, run_tests,
-         create_branch, commit_changes, generate_pr_description]
+tools = [list_files, read_file, search_codebase, semantic_search, write_to_file,
+         run_bash_command, run_tests, create_branch, commit_changes, generate_pr_description]
 
 FALLBACK_MODELS = [
     "gemini/gemini-2.0-flash",
@@ -340,9 +341,11 @@ executor_node = ToolNode(tools)
 
 def _track_tool_calls(state: GraphState) -> dict:
     """Wrap ToolNode to track write_to_file and search_codebase calls."""
+    global _semantic_search_call_count
     last = state["messages"][-1]
     writes = state.get("writes_performed", False)
     searches = state.get("search_call_count", 0)
+    semantic_searches = state.get("semantic_search_call_count", 0)
     wrote_this_turn = False
     if hasattr(last, "tool_calls"):
         for tc in last.tool_calls:
@@ -351,9 +354,13 @@ def _track_tool_calls(state: GraphState) -> dict:
                 wrote_this_turn = True
             if tc["name"] == "search_codebase":
                 searches += 1
+            if tc["name"] == "semantic_search":
+                semantic_searches += 1
+                _semantic_search_call_count += 1
     result = executor_node.invoke(state)
     result["writes_performed"] = writes
     result["search_call_count"] = searches
+    result["semantic_search_call_count"] = semantic_searches
     result["current_node"] = "executor"
     # Reset tests_passed to None whenever new files are written, so verify_code re-runs
     if wrote_this_turn:
@@ -462,6 +469,38 @@ NO_WRITE_MSG = SystemMessage(content=(
     "the changes before finishing."
 ))
 
+# Counters for semantic search usage (tracked per-run via module-level global)
+_semantic_search_call_count: int = 0
+
+SYSTEM = SystemMessage(content=(
+    "You are an autonomous coding agent that fixes bugs and implements features. "
+    "You have access to the following tools in two categories:\n\n"
+    "=== SEARCH TOOLS ===\n"
+    "1. search_codebase(keyword, directory) — Exact text matching. "
+    "Use for finding specific strings, variable names, function references.\n"
+    "2. semantic_search(query, k=5) — Semantic (meaning-based) search. "
+    "Use for finding code by concept or functionality. "
+    "Example: 'find where user authentication is handled' → semantic_search. "
+    "'find all occurrences of password' → search_codebase.\n\n"
+    "=== FILE / EXECUTION TOOLS ===\n"
+    "3. list_files(directory) — Show directory tree.\n"
+    "4. read_file(filepath) — Read a file (truncated at 2000 lines).\n"
+    "5. write_to_file(filepath, content) — Write/replace a file.\n"
+    "6. run_bash_command(command, workspace_dir) — Execute bash inside Docker sandbox.\n"
+    "7. run_tests(workspace_dir) — Run pytest inside Docker sandbox.\n\n"
+    "=== GIT TOOLS ===\n"
+    "8. create_branch(branch_name) — Create a new git branch.\n"
+    "9. commit_changes(message) — Stage and commit all changes.\n"
+    "10. generate_pr_description() — Generate a PR description from the diff.\n\n"
+    "=== RULES ===\n"
+    "- Always run tests (run_tests) after writing code to verify correctness.\n"
+    "- If tests fail, read the error output and fix the code.\n"
+    "- You MUST use write_to_file at least once before declaring the task done.\n"
+    "- Prefer semantic_search for understanding code structure and finding logic;\n"
+    "  use search_codebase only for exact string lookups.\n"
+    "- You have up to 15 iterations (20 for multi-file tasks) to complete the task."
+))
+
 
 def route_planner(state: GraphState) -> str:
     """Route after planner: executor → verify → planner cycle."""
@@ -545,6 +584,14 @@ def main():
     task = args.task or input("Enter task: ")
     workspace = os.path.abspath(args.workspace)
 
+    # Reset module-level counters
+    global _semantic_search_call_count
+    _semantic_search_call_count = 0
+
+    # Auto-build code index if missing or stale
+    from indexing.build_index import ensure_index_built
+    ensure_index_built(workspace)
+
     # Reset and configure the module-level tracker for this run
     _cost_tracker.reset()
     _cost_tracker.budget_usd = args.budget
@@ -569,6 +616,7 @@ def main():
         "iteration_count": 0,
         "writes_performed": False,
         "search_call_count": 0,
+        "semantic_search_call_count": 0,
         "tests_passed": None,
         "test_output": None,
         "verification_attempts": 0,
@@ -610,7 +658,8 @@ def main():
           f"total_tokens={summary['total_tokens']} | "
           f"most_used_model={most_used} | "
           f"circuit_events={len(_circuit_events)} | "
-          f"circuits_open={len(open_circuits)}")
+          f"circuits_open={len(open_circuits)} | "
+          f"semantic_search_calls={_semantic_search_call_count}")
 
 
 if __name__ == "__main__":
