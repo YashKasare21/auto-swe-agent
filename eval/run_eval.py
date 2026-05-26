@@ -60,6 +60,8 @@ class EvalResult:
     total_cost_usd: float = 0.0
     total_tokens: int = 0
     most_used_model: Optional[str] = None
+    circuit_events: int = 0
+    circuits_open: int = 0
 
 
 CASES = [
@@ -151,7 +153,7 @@ def _run_agent(case: EvalCase, timeout: int = 120) -> tuple[int, str]:
     return result.returncode, (result.stdout + result.stderr).strip()
 
 
-def _extract_meta(output: str) -> tuple[int, str, Optional[bool], int, Optional[str], Optional[str], float, int, Optional[str]]:
+def _extract_meta(output: str) -> tuple[int, str, Optional[bool], int, Optional[str], Optional[str], float, int, Optional[str], int, int]:
     """Parse all fields from the [SUMMARY] line printed by agent main()."""
     iterations = output.count("--- [NODE] PLANNER")
     model = "unknown"
@@ -166,6 +168,8 @@ def _extract_meta(output: str) -> tuple[int, str, Optional[bool], int, Optional[
     total_cost_usd: float = 0.0
     total_tokens: int = 0
     most_used_model: Optional[str] = None
+    circuit_events: int = 0
+    circuits_open: int = 0
 
     for line in output.splitlines():
         if "[SUMMARY]" in line:
@@ -184,11 +188,13 @@ def _extract_meta(output: str) -> tuple[int, str, Optional[bool], int, Optional[
                 total_tokens = int(_get("total_tokens"))
                 mum = line.split("most_used_model=")[1].strip()
                 most_used_model = None if mum == "None" else mum
+                circuit_events = int(_get("circuit_events"))
+                circuits_open = int(_get("circuits_open"))
             except (IndexError, ValueError):
                 pass
             break
 
-    return iterations, model, tests_passed, verification_attempts, branch_name, commit_hash, total_cost_usd, total_tokens, most_used_model
+    return iterations, model, tests_passed, verification_attempts, branch_name, commit_hash, total_cost_usd, total_tokens, most_used_model, circuit_events, circuits_open
 
 
 def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
@@ -221,7 +227,7 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
         for line in agent_output.splitlines()[-5:]:
             print(f"    {line}")
 
-        iterations, model, agent_tests_passed, agent_verification_attempts, branch_name, commit_hash, total_cost_usd, total_tokens, most_used_model = _extract_meta(agent_output)
+        iterations, model, agent_tests_passed, agent_verification_attempts, branch_name, commit_hash, total_cost_usd, total_tokens, most_used_model, circuit_events, circuits_open = _extract_meta(agent_output)
 
         # Run validation
         passed = False
@@ -250,6 +256,8 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
             total_cost_usd=total_cost_usd,
             total_tokens=total_tokens,
             most_used_model=most_used_model,
+            circuit_events=circuit_events,
+            circuits_open=circuits_open,
         ))
 
         if case != cases[-1]:
@@ -263,17 +271,28 @@ def print_report(results: list[EvalResult]) -> None:
     print(f"\n{'='*80}")
     print("EVAL REPORT")
     print(f"{'='*80}")
-    print(f"| {'Case':<28} | {'Result':<6} | {'Iter':>4} | {'Verify':>6} | {'Cost':>8} | {'Tokens':>7} | {'Time':>6} |")
-    print(f"|{'-'*30}|{'-'*8}|{'-'*6}|{'-'*8}|{'-'*10}|{'-'*9}|{'-'*8}|")
+    print(f"| {'Case':<28} | {'Result':<6} | {'Iter':>4} | {'Verify':>6} | {'Cost':>8} | "
+          f"{'Tokens':>7} | {'Time':>6} | {'CE':>3} |")
+    print(f"|{'-'*30}|{'-'*8}|{'-'*6}|{'-'*8}|{'-'*10}|{'-'*9}|{'-'*8}|{'-'*5}|")
     for r in results:
         status = "PASS" if r.passed else "FAIL"
         tp = "✓" if r.tests_passed else ("✗" if r.tests_passed is False else "-")
         cost_flag = " !" if r.total_cost_usd > 5.0 else ""
+        ce_flag = " !" if r.circuits_open > 0 else ""
         print(f"| {r.case_id:<28} | {status:<6} | {r.iterations_used:>4} | {tp:>4}/{r.verification_attempts:<1} | "
-              f"${r.total_cost_usd:>6.4f}{cost_flag} | {r.total_tokens:>7} | {r.time_taken:>5.1f}s |")
+              f"${r.total_cost_usd:>6.4f}{cost_flag} | {r.total_tokens:>7} | {r.time_taken:>5.1f}s | "
+              f"{r.circuit_events:>3}{ce_flag} |")
     passed = sum(r.passed for r in results)
     total_cost = sum(r.total_cost_usd for r in results)
-    print(f"\n{passed}/{len(results)} passed | Total cost: ${total_cost:.4f}")
+    total_ce = sum(r.circuit_events for r in results)
+    print(f"\n{passed}/{len(results)} passed | Total cost: ${total_cost:.4f} | "
+          f"Total circuit events: {total_ce}")
+
+    # Print circuit summary for any case with events
+    for r in results:
+        if r.circuit_events > 0:
+            print(f"  {r.case_id}: {r.circuit_events} circuit events "
+                  f"({r.circuits_open} circuits still open at end)")
 
 
 def save_results(results: list[EvalResult]) -> Path:

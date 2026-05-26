@@ -11,6 +11,8 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from tracking.cost_tracker import CostTracker
+from resilience.circuit_breaker import CircuitBreaker
+from resilience.retry import with_retry
 
 docker_client = docker.from_env()
 _sandbox: docker.models.containers.Container = None
@@ -19,6 +21,10 @@ _SANDBOX_LABEL = "auto-swe-agent-sandbox"
 # Module-level cost tracker (singleton, like _sandbox).
 # Kept outside GraphState because TypedDict can't hold arbitrary class instances.
 _cost_tracker: CostTracker = CostTracker(budget_usd=5.0)
+
+# Module-level circuit breaker and event log (reset each run in main()).
+_circuit_breaker: CircuitBreaker = CircuitBreaker(failure_threshold=5, recovery_timeout=300)
+_circuit_events: list[str] = []  # human-readable log of open/close events per run
 
 
 def get_sandbox(workspace_dir: str) -> docker.models.containers.Container:
@@ -143,6 +149,12 @@ FALLBACK_MODELS = [
 
 _SKIP_ERRORS = ("ResourceExhausted", "RateLimit", "QuotaExceeded", "APIConnectionError", "AuthenticationError", "BadRequestError")
 
+# Transient errors that warrant a retry (rate limits, timeouts, connection issues).
+# Auth/bad-request errors are NOT retried — they won't self-heal.
+_TRANSIENT_ERROR_NAMES = ("RateLimitError", "ResourceExhausted", "APIConnectionError",
+                          "Timeout", "ConnectionError", "ServiceUnavailable", "InternalServerError")
+_TRANSIENT_EXCEPTIONS = (Exception,)  # broad catch; filtered by name in _invoke_model
+
 
 def _model_available(model: str) -> bool:
     if model.startswith("gemini/") and not os.environ.get("GOOGLE_API_KEY") and not os.environ.get("GEMINI_API_KEY"):
@@ -156,36 +168,34 @@ def _make_llm(model: str):
     return ChatLiteLLM(model=model, temperature=0).bind_tools(tools)
 
 
-SYSTEM = SystemMessage(content=(
-    "You are an autonomous software engineer. Use list_files, read_file, and search_codebase "
-    "to explore the codebase, then use write_to_file to implement fixes, and run_bash_command "
-    "to run tests and verify your changes. You can also call run_tests at any time to check "
-    "test status. Once tests pass, you can use create_branch, commit_changes, and "
-    "generate_pr_description to commit your work like a real developer. "
-    "Do not just plan — actually implement and verify the fix. "
-    "When tests pass, state that the task is complete."
-))
+def _is_transient(e: Exception) -> bool:
+    """Return True if the exception is a transient API error worth retrying."""
+    name = type(e).__name__
+    msg = str(e).lower()
+    return (
+        any(t in name for t in _TRANSIENT_ERROR_NAMES) or
+        "rate limit" in msg or "timeout" in msg or "connection" in msg or
+        "503" in msg or "502" in msg or "529" in msg
+    )
 
 
-class GraphState(TypedDict):
-    messages: Annotated[list, add_messages]
-    workspace_dir: str
-    current_task: str
-    error_logs: str
-    plan: str
-    iteration_count: int
-    writes_performed: bool
-    search_call_count: int
-    # --- verification loop fields ---
-    tests_passed: Optional[bool]       # None=not yet run, True=pass, False=fail
-    test_output: Optional[str]         # stdout/stderr from last pytest run
-    verification_attempts: int         # number of fix retries so far
-    # --- git workflow fields ---
-    branch_name: Optional[str]         # branch created by git_workflow node
-    commit_hash: Optional[str]         # commit hash from git_workflow node
-    # --- cost tracking fields (serializable summary only) ---
-    total_cost_usd: float              # running total cost across all LLM calls
-    budget_exceeded: bool              # True if cost > budget
+def _invoke_model(model: str, msgs: list, max_retries: int, base_delay: float, max_delay: float):
+    """Call a single model with exponential backoff on transient errors."""
+    @with_retry(
+        max_retries=max_retries,
+        base_delay=base_delay,
+        max_delay=max_delay,
+        exponential_base=2.0,
+        retryable_exceptions=_TRANSIENT_EXCEPTIONS,
+    )
+    def _call():
+        try:
+            return _make_llm(model).invoke(msgs)
+        except Exception as e:
+            if _is_transient(e):
+                raise  # let with_retry handle it
+            raise  # non-transient: re-raise immediately (with_retry will also re-raise)
+    return _call()
 
 
 def planner_node(state: GraphState) -> dict:
@@ -199,19 +209,34 @@ def planner_node(state: GraphState) -> dict:
         trimmed.append(msg)
     extra = [NO_WRITE_MSG] if not state.get("writes_performed", False) and state["iteration_count"] > 0 else []
     msgs = [SYSTEM] + extra + trimmed
+
     for model in FALLBACK_MODELS:
         if not _model_available(model):
             print(f"[SKIP] {model} — no API key set.")
             continue
+
+        # Circuit breaker check
+        if not _circuit_breaker.can_call(model):
+            event = f"[CIRCUIT OPEN] Skipping {model} (cooldown active)"
+            print(event)
+            _circuit_events.append(event)
+            continue
+
         print(f"\n--- [NODE] PLANNER | model={model} ---")
         try:
-            response = _make_llm(model).invoke(msgs)
+            response = _invoke_model(
+                model, msgs,
+                max_retries=state.get("_retry_max", 3),
+                base_delay=state.get("_retry_delay", 2.0),
+                max_delay=30.0,
+            )
+            _circuit_breaker.record_success(model)
 
             # --- Cost tracking ---
             estimated = False
-            usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("usage", None)
+            usage = getattr(response, "usage_metadata", None) or \
+                    getattr(response, "response_metadata", {}).get("usage", None)
             if usage:
-                # LangChain usage_metadata keys vary by provider
                 input_tokens = (
                     getattr(usage, "prompt_token_count", None) or
                     getattr(usage, "input_tokens", None) or
@@ -223,7 +248,6 @@ def planner_node(state: GraphState) -> dict:
                     (usage.get("completion_tokens") if isinstance(usage, dict) else None) or 0
                 )
             else:
-                # Estimate: ~500 tokens per message, ~1 token per 4 chars of response
                 input_tokens = len(msgs) * 500
                 output_tokens = len(str(response.content)) // 4
                 estimated = True
@@ -233,7 +257,7 @@ def planner_node(state: GraphState) -> dict:
             total_cost = _cost_tracker.get_total_cost()
             print(f"[COST] ${total_cost:.6f} total | this call: in={input_tokens} out={output_tokens} tokens")
 
-            # Budget check — halt immediately if exceeded
+            # Budget check
             if _cost_tracker.check_budget_exceeded():
                 print(f"[COST] Budget exceeded (${total_cost:.4f} > ${_cost_tracker.budget_usd}). Halting.")
                 budget_msg = SystemMessage(
@@ -253,11 +277,21 @@ def planner_node(state: GraphState) -> dict:
                 "total_cost_usd": total_cost,
                 "budget_exceeded": False,
             }
+
         except Exception as e:
-            if any(t in type(e).__name__ for t in _SKIP_ERRORS) or "Missing" in str(e) or "key" in str(e).lower():
-                print(f"[FALLBACK] {model} failed: {type(e).__name__}. Trying next model...")
-                continue
-            raise
+            err_name = type(e).__name__
+            # Record circuit failure for transient errors; skip for auth/bad-request
+            is_permanent = any(t in err_name for t in _SKIP_ERRORS) or \
+                           "Missing" in str(e) or "key" in str(e).lower()
+            if not is_permanent:
+                _circuit_breaker.record_failure(model)
+                status = _circuit_breaker.get_status().get(model, {})
+                if status.get("state") == "open":
+                    event = f"[CIRCUIT OPENED] {model} after {status.get('failures')} failures"
+                    _circuit_events.append(event)
+            print(f"[FALLBACK] {model} failed: {err_name}. Trying next model...")
+            continue
+
     raise RuntimeError("All models in fallback chain exhausted.")
 
 
@@ -443,6 +477,14 @@ def main():
     parser.add_argument("--workspace", default="./")
     parser.add_argument("--budget", type=float, default=5.0,
                         help="Max spend in USD (0 = disable tracking)")
+    parser.add_argument("--retry-max", type=int, default=3,
+                        help="Max retries per model before fallback (default: 3)")
+    parser.add_argument("--retry-delay", type=float, default=2.0,
+                        help="Base delay in seconds for exponential backoff (default: 2.0)")
+    parser.add_argument("--circuit-threshold", type=int, default=5,
+                        help="Consecutive failures before circuit opens (default: 5)")
+    parser.add_argument("--circuit-timeout", type=int, default=300,
+                        help="Seconds before retrying an open circuit (default: 300)")
     args = parser.parse_args()
     task = args.task or input("Enter task: ")
     workspace = os.path.abspath(args.workspace)
@@ -451,8 +493,16 @@ def main():
     _cost_tracker.reset()
     _cost_tracker.budget_usd = args.budget
 
+    # Reset and configure the module-level circuit breaker for this run
+    _circuit_breaker.reset()
+    _circuit_breaker.failure_threshold = args.circuit_threshold
+    _circuit_breaker.recovery_timeout = args.circuit_timeout
+    _circuit_events.clear()
+
     print(f"Starting agent for task: {task}\nWorkspace: {workspace}\n"
-          f"Budget: {'disabled' if args.budget == 0 else f'${args.budget:.2f}'}\n")
+          f"Budget: {'disabled' if args.budget == 0 else f'${args.budget:.2f}'}\n"
+          f"Retry: max={args.retry_max} delay={args.retry_delay}s "
+          f"| Circuit: threshold={args.circuit_threshold} timeout={args.circuit_timeout}s\n")
 
     final_state = app.invoke({
         "messages": [HumanMessage(content=f"Task: {task}")],
@@ -470,6 +520,8 @@ def main():
         "commit_hash": None,
         "total_cost_usd": 0.0,
         "budget_exceeded": False,
+        "_retry_max": args.retry_max,
+        "_retry_delay": args.retry_delay,
     })
     print("\n=== FINAL ANSWER ===\n")
     content = final_state["messages"][-1].content
@@ -479,6 +531,17 @@ def main():
 
     summary = _cost_tracker.get_summary()
     most_used = summary.get("most_used_model") or "unknown"
+
+    # Print circuit breaker summary
+    circuit_status = _circuit_breaker.get_status()
+    open_circuits = [m for m, s in circuit_status.items() if s["state"] == "open"]
+    if _circuit_events:
+        print(f"\n[CIRCUIT EVENTS] ({len(_circuit_events)} total)")
+        for ev in _circuit_events[-5:]:
+            print(f"  {ev}")
+        if open_circuits:
+            print(f"  Circuits still open: {', '.join(open_circuits)}")
+
     # Print SUMMARY line (parsed by eval harness)
     print(f"\n[SUMMARY] tests_passed={final_state.get('tests_passed')} | "
           f"verification_attempts={final_state.get('verification_attempts', 0)} | "
@@ -486,7 +549,9 @@ def main():
           f"commit_hash={final_state.get('commit_hash')} | "
           f"total_cost_usd={summary['total_cost_usd']:.6f} | "
           f"total_tokens={summary['total_tokens']} | "
-          f"most_used_model={most_used}")
+          f"most_used_model={most_used} | "
+          f"circuit_events={len(_circuit_events)} | "
+          f"circuits_open={len(open_circuits)}")
 
 
 if __name__ == "__main__":
