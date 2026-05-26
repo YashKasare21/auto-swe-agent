@@ -12,6 +12,8 @@ from langgraph.prebuilt import ToolNode
 from tracking.cost_tracker import CostTracker
 from resilience.circuit_breaker import CircuitBreaker
 from ui.state_manager import AgentStateManager
+from observability.langfuse_client import get_langfuse
+from observability.tool_tracing import trace_tool_execution
 
 # ---------------------------------------------------------------------------
 # GraphState — the shared state passed between all graph nodes
@@ -43,6 +45,7 @@ class GraphState(TypedDict):
     _retry_max: int
     _retry_delay: float
     last_model_used: Optional[str]
+    langfuse_trace_id: Optional[str]
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +227,43 @@ def _export_ui_state(state: dict, node: str = "") -> None:
     }
     if state.get("budget_exceeded") or node == "end":
         ui_state["status"] = "completed"
+
+
+def _score_run(state: dict) -> None:
+    """Score the run in Langfuse based on outcome."""
+    trace_id = state.get("langfuse_trace_id")
+    langfuse = get_langfuse()
+    if not langfuse.is_enabled() or not trace_id:
+        return
+
+    tests_passed = state.get("tests_passed")
+    score_value = 1.0 if tests_passed else 0.0
+    langfuse.score(
+        trace_id=trace_id,
+        name="tests_passed",
+        value=score_value,
+        comment=f"verification_attempts={state.get('verification_attempts', 0)} | branch={state.get('branch_name')} | commit={state.get('commit_hash')}",
+    )
+
+    if _review_feedbacks:
+        lgtm_pct = _review_feedbacks.count("LGTM") / len(_review_feedbacks) * 100
+        langfuse.score(
+            trace_id=trace_id,
+            name="review_quality",
+            value=lgtm_pct / 100.0,
+            comment=f"lgtm={_review_feedbacks.count('LGTM')} / needs_fix={_review_feedbacks.count('NEEDS_FIX')}",
+        )
+
+    if _agent_call_counts:
+        total = sum(_agent_call_counts.values())
+        if total > 0:
+            efficiency = 1.0 - min(_semantic_search_call_count / total, 1.0)
+            langfuse.score(
+                trace_id=trace_id,
+                name="search_efficiency",
+                value=efficiency,
+                comment=f"semantic_search_calls={_semantic_search_call_count} | total_calls={total}",
+            )
     _state_manager.save_state(ui_state)
 
 
@@ -259,15 +299,19 @@ from agents.reviewer import reviewer_node
 
 
 def _track_tool_calls(state: GraphState) -> dict:
-    """Wrap ToolNode to track tool usage."""
+    """Wrap ToolNode to track tool usage and trace to Langfuse."""
     global _semantic_search_call_count
     last = state["messages"][-1]
     writes = state.get("writes_performed", False)
     searches = state.get("search_call_count", 0)
     semantic_searches = state.get("semantic_search_call_count", 0)
     wrote_this_turn = False
+    trace_id = state.get("langfuse_trace_id")
+
+    tool_calls_info = []
     if hasattr(last, "tool_calls"):
         for tc in last.tool_calls:
+            tool_calls_info.append((tc["name"], str(tc.get("args", {}))[:200]))
             if tc["name"] == "write_to_file":
                 writes = True
                 wrote_this_turn = True
@@ -276,11 +320,28 @@ def _track_tool_calls(state: GraphState) -> dict:
             if tc["name"] == "semantic_search":
                 semantic_searches += 1
                 _semantic_search_call_count += 1
+
+    if trace_id and tool_calls_info:
+        span = get_langfuse().span(
+            trace_id=trace_id,
+            name="tool-execution-batch",
+            input={"tool_calls": tool_calls_info},
+        )
+
     result = executor_node.invoke(state)
     result["writes_performed"] = writes
     result["search_call_count"] = searches
     result["semantic_search_call_count"] = semantic_searches
     result["current_node"] = "executor"
+
+    # Trace individual tool results
+    if trace_id:
+        for tc_name, tc_input in tool_calls_info:
+            trace_tool_execution(trace_id, tc_name, tc_input, result)
+
+    if trace_id and tool_calls_info:
+        span.update(output={"status": "success", "results_count": len(tool_calls_info)})
+
     if wrote_this_turn:
         result["tests_passed"] = None
     _export_ui_state({**state, **result}, "executor")
@@ -368,21 +429,28 @@ def git_workflow(state: GraphState) -> dict:
 
 
 def route_manager(state: GraphState) -> str:
-    return "end" if state.get("error_logs") else "planner"
+    target = "end" if state.get("error_logs") else "planner"
+    log_routing(state, "manager", target)
+    return target
 
 
 def route_planner(state: GraphState) -> str:
-    return "end" if state.get("error_logs") else "coder"
+    target = "end" if state.get("error_logs") else "coder"
+    log_routing(state, "planner", target)
+    return target
 
 
 def route_coder(state: GraphState) -> str:
     if state.get("error_logs"):
+        log_routing(state, "coder", "end")
         return "end"
     if state.get("budget_exceeded"):
         print("[COST] Budget exceeded — routing to end.")
+        log_routing(state, "coder", "end")
         return "end"
     last = state["messages"][-1]
     if hasattr(last, "tool_calls") and last.tool_calls:
+        log_routing(state, "coder", "executor")
         return "executor"
     task = state.get("current_task", "")
     is_multi_file = any(k in task.lower() for k in MULTI_FILE_KEYWORDS) or \
@@ -390,19 +458,25 @@ def route_coder(state: GraphState) -> str:
     limit = 20 if is_multi_file else 15
     if state["iteration_count"] >= limit:
         print(f"[WARNING] Iteration limit ({limit}) reached. Forcing end.")
+        log_routing(state, "coder", "end")
         return "end"
     if not state.get("writes_performed", False):
         print("[GUARD] No files written yet — forcing back to coder.")
+        log_routing(state, "coder", "coder")
         return "coder"
+    log_routing(state, "coder", "verify")
     return "verify"
 
 
 def route_verify(state: GraphState) -> str:
     if state.get("tests_passed"):
+        log_routing(state, "verify", "reviewer")
         return "reviewer"
     if state.get("verification_attempts", 0) < 3:
+        log_routing(state, "verify", "coder")
         return "coder"
     print("[VERIFY] Max verification attempts reached. Ending.")
+    log_routing(state, "verify", "end")
     return "end"
 
 
@@ -411,13 +485,37 @@ def route_reviewer(state: GraphState) -> str:
     if "LGTM" in review:
         global _review_feedbacks
         _review_feedbacks.append("LGTM")
+        log_routing(state, "reviewer", "git_workflow")
         return "git_workflow"
     _review_feedbacks.append("NEEDS_FIX")
+    log_routing(state, "reviewer", "coder")
     return "coder"
 
 
 def route_git(state: GraphState) -> str:
+    log_routing(state, "git_workflow", "end")
     return "end"
+
+
+def log_routing(state: GraphState, source: str, target: str) -> None:
+    """Trace routing decisions to Langfuse."""
+    trace_id = state.get("langfuse_trace_id")
+    if trace_id:
+        langfuse = get_langfuse()
+        if langfuse.is_enabled():
+            span = langfuse.span(
+                trace_id=trace_id,
+                name=f"routing-{source}->{target}",
+                input={
+                    "source": source,
+                    "target": target,
+                    "iteration": state.get("iteration_count"),
+                    "tests_passed": state.get("tests_passed"),
+                    "writes_performed": state.get("writes_performed"),
+                    "budget_exceeded": state.get("budget_exceeded"),
+                },
+            )
+            span.update(output={"status": "routed"})
 
 
 # ---------------------------------------------------------------------------
@@ -761,6 +859,7 @@ def main():
         "_retry_max": args.retry_max,
         "_retry_delay": args.retry_delay,
         "last_model_used": None,
+        "langfuse_trace_id": None,
     }
 
     final_state = app.invoke(initial_state)
@@ -799,6 +898,16 @@ def main():
           f"semantic_search_calls={_semantic_search_call_count} | "
           f"lgtm={lgtm_count} | "
           f"needs_fix={needs_fix_count}")
+
+    # Langfuse observability: score and flush
+    _score_run(final_state)
+
+    trace_id = final_state.get("langfuse_trace_id")
+    if trace_id:
+        host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+        print(f"\n[LANGFUSE] Trace: {host}/trace/{trace_id}")
+
+    get_langfuse().flush()
 
 
 if __name__ == "__main__":

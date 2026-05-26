@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from observability.langfuse_client import get_langfuse
+
 AGENT_DIR = Path(__file__).parent.parent
 VENV_PYTHON = AGENT_DIR / "venv" / "bin" / "python"
 VENV_PYTEST = AGENT_DIR / "venv" / "bin" / "pytest"
@@ -156,6 +158,13 @@ def _run_agent(case: EvalCase, timeout: int = 120) -> tuple[int, str]:
     return result.returncode, (result.stdout + result.stderr).strip()
 
 
+def _extract_langfuse_trace(output: str) -> Optional[str]:
+    for line in output.splitlines():
+        if "[LANGFUSE] Trace:" in line:
+            return line.split("Trace:")[-1].strip().split("/")[-1].strip()
+    return None
+
+
 def _extract_meta(output: str) -> tuple:
     """Parse all fields from the [SUMMARY] line printed by agent main()."""
     iterations = output.count("--- [NODE] PLANNER")
@@ -214,11 +223,22 @@ def _extract_meta(output: str) -> tuple:
 
 def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
     results: list[EvalResult] = []
+    langfuse = get_langfuse()
+    eval_trace_ids: list[str] = []
 
     for case in cases:
         print(f"\n{'='*60}")
         print(f"Running: {case.case_id}")
         print(f"{'='*60}")
+
+        # Create eval-level trace
+        eval_trace = langfuse.create_trace(
+            name=f"eval-{case.case_id}",
+            metadata={"case_id": case.case_id, "issue_preview": case.issue[:100]},
+        )
+        eval_trace_id = eval_trace.id if eval_trace is not None else None
+        if eval_trace_id:
+            eval_trace_ids.append(eval_trace_id)
 
         print("  Resetting to buggy state...")
         _reset_case(case)
@@ -229,7 +249,6 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
         try:
             code, agent_output = _run_agent(case)
             if code != 0:
-                # Extract the actual exception from the output
                 for line in reversed(agent_output.splitlines()):
                     if line.strip() and not line.startswith(" "):
                         error = line.strip()
@@ -248,7 +267,10 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
          most_used_model, circuit_events, circuits_open,
          semantic_search_calls, lgtm_count, needs_fix_count) = meta[:14]
 
-        # Run validation
+        agent_trace_id = _extract_langfuse_trace(agent_output)
+        if agent_trace_id:
+            print(f"  Langfuse agent trace: {os.getenv('LANGFUSE_HOST', 'https://cloud.langfuse.com')}/trace/{agent_trace_id}")
+
         passed = False
         if not error:
             _pre_validation_check(case)
@@ -260,6 +282,22 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
             print(f"  {val_out[:300]}")
         else:
             print(f"  Skipping validation — agent error: {error}")
+
+        # Score the eval trace
+        if eval_trace_id:
+            langfuse.score(
+                trace_id=eval_trace_id,
+                name="eval_passed",
+                value=1.0 if passed else 0.0,
+                comment=f"time={elapsed}s cost=${total_cost_usd:.4f} iterations={iterations}",
+            )
+            if error:
+                langfuse.score(
+                    trace_id=eval_trace_id,
+                    name="eval_error",
+                    value=0.0,
+                    comment=str(error)[:200],
+                )
 
         results.append(EvalResult(
             case_id=case.case_id,
@@ -286,6 +324,7 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
             print("  [RATE LIMIT] Waiting 30s before next case...")
             time.sleep(30)
 
+    langfuse.flush()
     return results
 
 

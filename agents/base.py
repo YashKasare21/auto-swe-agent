@@ -4,6 +4,7 @@ from typing import Any, Callable, Optional
 
 from langchain_community.chat_models import ChatLiteLLM
 from langchain_core.messages import SystemMessage
+from observability.langfuse_client import get_langfuse
 
 _SKIP_ERRORS = (
     "ResourceExhausted", "RateLimit", "QuotaExceeded",
@@ -87,6 +88,26 @@ def _call_with_retry(model: str, msgs: list, max_retries: int, base_delay: float
     raise RuntimeError("Unreachable")
 
 
+def _extract_usage(response) -> Optional[dict]:
+    usage = getattr(response, "usage_metadata", None) or \
+            getattr(response, "response_metadata", {}).get("usage", None)
+    if usage is None:
+        return None
+    input_tokens = (
+        getattr(usage, "prompt_token_count", None)
+        or getattr(usage, "input_tokens", None)
+        or (usage.get("prompt_tokens") if isinstance(usage, dict) else None)
+        or 0
+    )
+    output_tokens = (
+        getattr(usage, "candidates_token_count", None)
+        or getattr(usage, "output_tokens", None)
+        or (usage.get("completion_tokens") if isinstance(usage, dict) else None)
+        or 0
+    )
+    return {"input": input_tokens, "output": output_tokens, "unit": "TOKENS"}
+
+
 def invoke_agent(
     system_prompt: str,
     state: dict,
@@ -100,6 +121,21 @@ def invoke_agent(
     circuit_events = _runtime.circuit_events
     export_ui_state_fn = _runtime.export_ui_state_fn
 
+    langfuse = get_langfuse()
+    trace_id = state.get("langfuse_trace_id")
+
+    if langfuse.is_enabled() and not trace_id:
+        trace = langfuse.create_trace(
+            name=f"auto-swe-agent",
+            metadata={
+                "task": state.get("current_task", "unknown")[:200],
+                "workspace": state.get("workspace_dir", "unknown"),
+                "mode": "multi-agent",
+            },
+        )
+        if trace is not None and hasattr(trace, "id"):
+            trace_id = trace.id
+
     trimmed = []
     for msg in state["messages"][-context_window:]:
         if hasattr(msg, "content") and isinstance(msg.content, str) and len(msg.content) > 4000:
@@ -112,6 +148,19 @@ def invoke_agent(
         trimmed.append(msg)
 
     msgs = [SystemMessage(content=system_prompt)] + (extra_messages or []) + trimmed
+    last_input = trimmed[-1].content if trimmed else ""
+
+    agent_span = None
+    if langfuse.is_enabled() and trace_id:
+        agent_span = langfuse.span(
+            trace_id=trace_id,
+            name=f"agent-{node_name}",
+            input={
+                "messages_count": len(msgs),
+                "context_window": context_window,
+                "last_input_preview": str(last_input)[:300],
+            },
+        )
 
     for model in _runtime.fallback_models:
         if not _model_available(model):
@@ -134,31 +183,36 @@ def invoke_agent(
             )
             circuit_breaker.record_success(model)
 
-            estimated = False
-            usage = getattr(response, "usage_metadata", None) or \
-                    getattr(response, "response_metadata", {}).get("usage", None)
-            if usage:
-                input_tokens = (
-                    getattr(usage, "prompt_token_count", None)
-                    or getattr(usage, "input_tokens", None)
-                    or (usage.get("prompt_tokens") if isinstance(usage, dict) else None)
-                    or 0
-                )
-                output_tokens = (
-                    getattr(usage, "candidates_token_count", None)
-                    or getattr(usage, "output_tokens", None)
-                    or (usage.get("completion_tokens") if isinstance(usage, dict) else None)
-                    or 0
-                )
+            usage_dict = _extract_usage(response)
+            if usage_dict:
+                input_tokens = usage_dict["input"]
+                output_tokens = usage_dict["output"]
+                estimated = False
             else:
                 input_tokens = len(msgs) * 500
                 output_tokens = len(str(response.content)) // 4
                 estimated = True
                 print(f"[COST] Token counts unavailable — using estimates (in={input_tokens}, out={output_tokens})")
 
+            # Langfuse generation trace
+            if langfuse.is_enabled() and trace_id:
+                gen_params = {
+                    "trace_id": trace_id,
+                    "name": f"llm-{node_name}",
+                    "model": model,
+                    "input": str(last_input)[:500],
+                    "output": str(response.content)[:1000] if hasattr(response, "content") else str(response)[:1000],
+                }
+                if usage_dict:
+                    gen_params["usage"] = usage_dict
+                langfuse.generation(**gen_params)
+
             cost_tracker.add_call(model, input_tokens, output_tokens, node_name, estimated)
             total_cost = cost_tracker.get_total_cost()
             print(f"[COST] ${total_cost:.6f} total | this call: in={input_tokens} out={output_tokens} tokens")
+
+            if agent_span is not None:
+                agent_span.update(output={"status": "success", "model_used": model})
 
             if cost_tracker.check_budget_exceeded():
                 print(f"[COST] Budget exceeded (${total_cost:.4f} > ${cost_tracker.budget_usd}).")
@@ -174,6 +228,8 @@ def invoke_agent(
                     "current_node": node_name,
                     "current_agent": node_name,
                 }
+                if trace_id:
+                    result["langfuse_trace_id"] = trace_id
                 if export_ui_state_fn:
                     export_ui_state_fn({**state, **result}, node_name)
                 return result
@@ -186,6 +242,8 @@ def invoke_agent(
                 "current_node": node_name,
                 "current_agent": node_name,
             }
+            if trace_id:
+                result["langfuse_trace_id"] = trace_id
             if export_ui_state_fn:
                 export_ui_state_fn({**state, **result}, node_name)
             return result
@@ -203,6 +261,10 @@ def invoke_agent(
                     event = f"[CIRCUIT OPENED] {model} after {status.get('failures')} failures"
                     circuit_events.append(event)
             print(f"[FALLBACK] {model} failed: {err_name}. Trying next model...")
+            if agent_span is not None:
+                agent_span.update(output={"status": "fallback", "error": err_name, "model": model})
             continue
 
+    if agent_span is not None:
+        agent_span.update(output={"status": "error", "error": "All models exhausted"})
     raise RuntimeError("All models in fallback chain exhausted.")
