@@ -312,7 +312,7 @@ elif page == "📊 Live Monitor":
             # Node diagram
             st.subheader("Current Node")
             current_node = state.get("current_node", "idle")
-            st.markdown(render_graph(current_node), unsafe_allow_html=True)
+            st.markdown(render_graph(current_node, state), unsafe_allow_html=True)
 
             # Current agent badge
             agent_colors = {

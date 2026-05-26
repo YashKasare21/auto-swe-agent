@@ -4,15 +4,21 @@ from __future__ import annotations
 from typing import Optional
 
 
-def render_graph(current_node: Optional[str] = None) -> str:
+def render_graph(current_node: Optional[str] = None, state: Optional[dict] = None) -> str:
     """Return an HTML+CSS flow diagram as a string.
 
     Supports both single-agent (planner → executor ↔ verify → git)
     and multi-agent (manager → planner → coder ↔ executor → verify → reviewer → git) flows.
+
+    Determines mode from the state's `current_agent` field, or by checking if
+    the current_node is specific to multi-agent mode.
     """
-    is_multi = current_node in ("manager", "coder", "reviewer") or (
-        current_node and current_node not in ("planner", "executor", "verify", "git_workflow", "end")
-    )
+    if state and state.get("current_agent") in ("manager", "coder", "reviewer"):
+        is_multi = True
+    elif current_node in ("manager", "coder", "reviewer"):
+        is_multi = True
+    else:
+        is_multi = False
 
     if is_multi:
         nodes = [
