@@ -10,9 +10,15 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
+from tracking.cost_tracker import CostTracker
+
 docker_client = docker.from_env()
 _sandbox: docker.models.containers.Container = None
 _SANDBOX_LABEL = "auto-swe-agent-sandbox"
+
+# Module-level cost tracker (singleton, like _sandbox).
+# Kept outside GraphState because TypedDict can't hold arbitrary class instances.
+_cost_tracker: CostTracker = CostTracker(budget_usd=5.0)
 
 
 def get_sandbox(workspace_dir: str) -> docker.models.containers.Container:
@@ -177,6 +183,9 @@ class GraphState(TypedDict):
     # --- git workflow fields ---
     branch_name: Optional[str]         # branch created by git_workflow node
     commit_hash: Optional[str]         # commit hash from git_workflow node
+    # --- cost tracking fields (serializable summary only) ---
+    total_cost_usd: float              # running total cost across all LLM calls
+    budget_exceeded: bool              # True if cost > budget
 
 
 def planner_node(state: GraphState) -> dict:
@@ -197,7 +206,53 @@ def planner_node(state: GraphState) -> dict:
         print(f"\n--- [NODE] PLANNER | model={model} ---")
         try:
             response = _make_llm(model).invoke(msgs)
-            return {"messages": [response], "iteration_count": state["iteration_count"] + 1}
+
+            # --- Cost tracking ---
+            estimated = False
+            usage = getattr(response, "usage_metadata", None) or getattr(response, "response_metadata", {}).get("usage", None)
+            if usage:
+                # LangChain usage_metadata keys vary by provider
+                input_tokens = (
+                    getattr(usage, "prompt_token_count", None) or
+                    getattr(usage, "input_tokens", None) or
+                    (usage.get("prompt_tokens") if isinstance(usage, dict) else None) or 0
+                )
+                output_tokens = (
+                    getattr(usage, "candidates_token_count", None) or
+                    getattr(usage, "output_tokens", None) or
+                    (usage.get("completion_tokens") if isinstance(usage, dict) else None) or 0
+                )
+            else:
+                # Estimate: ~500 tokens per message, ~1 token per 4 chars of response
+                input_tokens = len(msgs) * 500
+                output_tokens = len(str(response.content)) // 4
+                estimated = True
+                print(f"[COST] Token counts unavailable — using estimates (in={input_tokens}, out={output_tokens})")
+
+            _cost_tracker.add_call(model, input_tokens, output_tokens, "planner", estimated)
+            total_cost = _cost_tracker.get_total_cost()
+            print(f"[COST] ${total_cost:.6f} total | this call: in={input_tokens} out={output_tokens} tokens")
+
+            # Budget check — halt immediately if exceeded
+            if _cost_tracker.check_budget_exceeded():
+                print(f"[COST] Budget exceeded (${total_cost:.4f} > ${_cost_tracker.budget_usd}). Halting.")
+                budget_msg = SystemMessage(
+                    content=f"Budget exceeded (${total_cost:.4f} > ${_cost_tracker.budget_usd}). Halting execution."
+                )
+                return {
+                    "messages": [response, budget_msg],
+                    "iteration_count": state["iteration_count"] + 1,
+                    "total_cost_usd": total_cost,
+                    "budget_exceeded": True,
+                    "tests_passed": False,
+                }
+
+            return {
+                "messages": [response],
+                "iteration_count": state["iteration_count"] + 1,
+                "total_cost_usd": total_cost,
+                "budget_exceeded": False,
+            }
         except Exception as e:
             if any(t in type(e).__name__ for t in _SKIP_ERRORS) or "Missing" in str(e) or "key" in str(e).lower():
                 print(f"[FALLBACK] {model} failed: {type(e).__name__}. Trying next model...")
@@ -320,6 +375,11 @@ NO_WRITE_MSG = SystemMessage(content=(
 
 def route_planner(state: GraphState) -> str:
     """Route after planner: executor → verify → planner cycle."""
+    # Budget halt — stop immediately
+    if state.get("budget_exceeded"):
+        print("[COST] Budget exceeded — routing to end.")
+        return "end"
+
     task = state.get("current_task", "")
     is_multi_file = any(k in task.lower() for k in MULTI_FILE_KEYWORDS) or \
                     state.get("search_call_count", 0) > 3
@@ -381,10 +441,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("task", nargs="?", default=None)
     parser.add_argument("--workspace", default="./")
+    parser.add_argument("--budget", type=float, default=5.0,
+                        help="Max spend in USD (0 = disable tracking)")
     args = parser.parse_args()
     task = args.task or input("Enter task: ")
     workspace = os.path.abspath(args.workspace)
-    print(f"Starting agent for task: {task}\nWorkspace: {workspace}\n")
+
+    # Reset and configure the module-level tracker for this run
+    _cost_tracker.reset()
+    _cost_tracker.budget_usd = args.budget
+
+    print(f"Starting agent for task: {task}\nWorkspace: {workspace}\n"
+          f"Budget: {'disabled' if args.budget == 0 else f'${args.budget:.2f}'}\n")
+
     final_state = app.invoke({
         "messages": [HumanMessage(content=f"Task: {task}")],
         "workspace_dir": workspace,
@@ -399,17 +468,25 @@ def main():
         "verification_attempts": 0,
         "branch_name": None,
         "commit_hash": None,
+        "total_cost_usd": 0.0,
+        "budget_exceeded": False,
     })
     print("\n=== FINAL ANSWER ===\n")
     content = final_state["messages"][-1].content
     if isinstance(content, list):
         content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
     print(content)
-    # Print verification and git summary (parsed by eval harness)
+
+    summary = _cost_tracker.get_summary()
+    most_used = summary.get("most_used_model") or "unknown"
+    # Print SUMMARY line (parsed by eval harness)
     print(f"\n[SUMMARY] tests_passed={final_state.get('tests_passed')} | "
           f"verification_attempts={final_state.get('verification_attempts', 0)} | "
           f"branch_name={final_state.get('branch_name')} | "
-          f"commit_hash={final_state.get('commit_hash')}")
+          f"commit_hash={final_state.get('commit_hash')} | "
+          f"total_cost_usd={summary['total_cost_usd']:.6f} | "
+          f"total_tokens={summary['total_tokens']} | "
+          f"most_used_model={most_used}")
 
 
 if __name__ == "__main__":
