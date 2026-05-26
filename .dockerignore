@@ -1,0 +1,33 @@
+.git/
+.gitignore
+__pycache__/
+*.pyc
+venv/
+.venv/
+.env
+*.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.gitkeep
+Dockerfile
+.dockerignore
+
+# Heavy local artifacts
+indexing/code_index.*
+ui/.agent_state.json
+eval/results_*.json
+*.faiss
+*.pkl
+
+# Build context — hf-space is for HF Spaces only
+hf-space/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

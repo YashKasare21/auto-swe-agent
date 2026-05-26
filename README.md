@@ -9,6 +9,7 @@
 [![Langfuse](https://img.shields.io/badge/Observability-Langfuse-000000?logo=langfuse&logoColor=white)](https://langfuse.com)
 [![FAISS](https://img.shields.io/badge/Vector%20Search-FAISS-0066CC?logo=facebook&logoColor=white)](https://github.com/facebookresearch/faiss)
 [![Docker](https://img.shields.io/badge/Sandbox-Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com)
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Spaces-Live%20Demo-FF9D00?logo=huggingface&logoColor=white)](https://huggingface.co/spaces/YashKasare/auto-swe-agent)
 
 ---
 
@@ -17,6 +18,24 @@
 An **autonomous multi-agent software engineering system** that ingests natural-language issue descriptions, performs contextual codebase exploration, implements fixes through a coordinated agent pipeline, validates correctness via automated test execution inside an isolated Docker container, and persists changes through a structured git workflow — all without human intervention.
 
 Built on **LangGraph** for stateful agent orchestration, **LiteLLM** for dynamic model routing across Gemini and Groq providers, and **sentence-transformers with FAISS** for hybrid semantic code retrieval.
+
+---
+
+## 🎥 Live Demo
+
+Try the Streamlit diagnostic dashboard live on Hugging Face Spaces:
+
+[![Hugging Face Space](https://img.shields.io/badge/%F0%9F%A4%97%20Try%20on%20Hugging%20Face%20Spaces-FF9D00?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/spaces/YashKasare/auto-swe-agent)
+
+The dashboard provides real-time visibility into:
+- **Agent Graph** — live LangGraph node highlighting as the pipeline executes
+- **Cost Analytics** — per-model token spend, budget utilisation gauge, and historical cost trends
+- **Circuit Breaker** — per-model health status, failure counts, and recovery state tracking
+- **Eval Results** — historical pass/fail rates, iteration distributions, and model usage breakdowns
+
+> **Note**: API keys (GEMINI_API_KEY, GROQ_API_KEY) must be configured as [Space secrets](https://huggingface.co/docs/hub/spaces-secrets) for the agent run functionality to work. The dashboard UI loads in read-only mode without keys.
+
+To deploy your own instance, see the [Deployment Guide](docs/hf_deploy.md).
 
 ---
 
