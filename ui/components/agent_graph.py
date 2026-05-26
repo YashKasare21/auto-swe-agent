@@ -1,4 +1,4 @@
-"""Visualisez the LangGraph flow with the current node highlighted."""
+"""Visualise the LangGraph flow with the current node highlighted."""
 from __future__ import annotations
 
 from typing import Optional
@@ -7,30 +7,38 @@ from typing import Optional
 def render_graph(current_node: Optional[str] = None) -> str:
     """Return an HTML+CSS flow diagram as a string.
 
-    Nodes: planner -> executor -> verify -> git_workflow -> END.
-    The *current_node* is highlighted in green; completed path is dimmed.
+    Supports both single-agent (planner → executor ↔ verify → git)
+    and multi-agent (manager → planner → coder ↔ executor → verify → reviewer → git) flows.
     """
-    nodes = [
-        ("planner", "Planner"),
-        ("executor", "Executor"),
-        ("verify", "Verify"),
-        ("git_workflow", "Git Workflow"),
-        ("end", "END"),
-    ]
+    is_multi = current_node in ("manager", "coder", "reviewer") or (
+        current_node and current_node not in ("planner", "executor", "verify", "git_workflow", "end")
+    )
 
-    arrows = [
-        ("planner", "executor"),
-        ("executor", "planner"),
-        ("planner", "verify"),
-        ("verify", "planner"),
-        ("verify", "git_workflow"),
-        ("git_workflow", "end"),
-        ("planner", "end"),
-    ]
+    if is_multi:
+        nodes = [
+            ("manager", "Manager"),
+            ("planner", "Planner"),
+            ("coder", "Coder"),
+            ("executor", "Executor"),
+            ("verify", "Verify"),
+            ("reviewer", "Reviewer"),
+            ("git_workflow", "Git Workflow"),
+            ("end", "END"),
+        ]
+    else:
+        nodes = [
+            ("planner", "Planner"),
+            ("executor", "Executor"),
+            ("verify", "Verify"),
+            ("git_workflow", "Git Workflow"),
+            ("end", "END"),
+        ]
 
     def _color(nid: str) -> str:
         if nid == current_node:
             return "#22c55e"
+        if nid == "end":
+            return "#f3f4f6"
         return "#e5e7eb"
 
     def _text_color(nid: str) -> str:
@@ -57,23 +65,26 @@ def render_graph(current_node: Optional[str] = None) -> str:
             f"</div>"
         )
 
-    # Simple grid layout: two rows
-    # Row 1: planner --[executor loop]--> verify --[git]--> END
-    # Row 2: (hidden arrows back from executor/verify to planner)
+    # Build arrows between consecutive nodes
+    arrow_divs = []
+    for i in range(len(node_divs) - 1):
+        arrow_divs.append(node_divs[i])
+        # Add loop indicator between coder↔executor
+        if is_multi and nodes[i][0] == "executor":
+            arrow_divs.append(
+                '<div style="color:#9ca3af;font-size:12px;writing-mode:vertical-lr;'
+                'text-orientation:mixed;opacity:0.5">↻ loop</div>'
+            )
+            arrow_divs.append(node_divs[i])
+        arrow_divs.append(
+            '<div style="color:#9ca3af;font-size:20px">→</div>'
+        )
+    arrow_divs.append(node_divs[-1])
+
     html = f"""
     <div style="font-family:'Segoe UI',system-ui,sans-serif;padding:8px 0">
       <div style="display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap">
-        {node_divs[0]}
-        <div style="color:#9ca3af;font-size:20px">→</div>
-        {node_divs[1]}
-        <div style="color:#9ca3af;font-size:12px;writing-mode:vertical-lr;text-orientation:mixed;opacity:0.5">↻ loop</div>
-        {node_divs[0]}
-        <div style="color:#9ca3af;font-size:20px">→</div>
-        {node_divs[2]}
-        <div style="color:#9ca3af;font-size:20px">→</div>
-        {node_divs[3]}
-        <div style="color:#9ca3af;font-size:20px">→</div>
-        {node_divs[4]}
+        {''.join(arrow_divs)}
       </div>
     </div>
     """

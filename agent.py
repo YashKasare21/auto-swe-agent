@@ -3,7 +3,6 @@ import time
 from typing import Annotated, Optional, TypedDict
 
 import docker
-from langchain_community.chat_models import ChatLiteLLM
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, END
@@ -12,23 +11,62 @@ from langgraph.prebuilt import ToolNode
 
 from tracking.cost_tracker import CostTracker
 from resilience.circuit_breaker import CircuitBreaker
-from resilience.retry import with_retry
 from ui.state_manager import AgentStateManager
+
+# ---------------------------------------------------------------------------
+# GraphState — the shared state passed between all graph nodes
+# ---------------------------------------------------------------------------
+
+MULTI_FILE_KEYWORDS = ("3 files", "multiple files", "several files", "all files")
+
+
+class GraphState(TypedDict):
+    messages: Annotated[list, add_messages]
+    workspace_dir: str
+    current_task: str
+    error_logs: str
+    plan: str
+    complexity: Optional[str]
+    review_feedback: Optional[str]
+    current_agent: Optional[str]
+    iteration_count: int
+    writes_performed: bool
+    search_call_count: int
+    semantic_search_call_count: int
+    tests_passed: Optional[bool]
+    test_output: Optional[str]
+    verification_attempts: int
+    branch_name: Optional[str]
+    commit_hash: Optional[str]
+    total_cost_usd: float
+    budget_exceeded: bool
+    _retry_max: int
+    _retry_delay: float
+    last_model_used: Optional[str]
+
+
+# ---------------------------------------------------------------------------
+# Module-level singletons
+# ---------------------------------------------------------------------------
 
 docker_client = docker.from_env()
 _sandbox: docker.models.containers.Container = None
 _SANDBOX_LABEL = "auto-swe-agent-sandbox"
 
-# Module-level cost tracker (singleton, like _sandbox).
 # Kept outside GraphState because TypedDict can't hold arbitrary class instances.
 _cost_tracker: CostTracker = CostTracker(budget_usd=5.0)
-
-# Module-level circuit breaker and event log (reset each run in main()).
 _circuit_breaker: CircuitBreaker = CircuitBreaker(failure_threshold=5, recovery_timeout=300)
-_circuit_events: list[str] = []  # human-readable log of open/close events per run
-
-# Module-level state manager for UI live monitoring (reset at each main()).
+_circuit_events: list[str] = []
 _state_manager: AgentStateManager = AgentStateManager()
+
+# Per-run counters
+_semantic_search_call_count: int = 0
+_agent_call_counts: dict[str, int] = {}  # agent_name -> call count for eval tracking
+_review_feedbacks: list[str] = []  # LGTM / NEEDS_FIX outcomes for eval tracking
+
+# ---------------------------------------------------------------------------
+# Docker sandbox
+# ---------------------------------------------------------------------------
 
 
 def get_sandbox(workspace_dir: str) -> docker.models.containers.Container:
@@ -60,10 +98,14 @@ def get_sandbox(workspace_dir: str) -> docker.models.containers.Container:
         raise RuntimeError(f"[Docker] pip install failed (exit {exit_code}):\n{output.decode()}")
     exit_code, _ = _sandbox.exec_run(["python", "-c", "import fastapi, pytest, httpx, uvicorn"])
     if exit_code != 0:
-        raise RuntimeError("[Docker] Health check failed — packages not importable after install.")
+        raise RuntimeError("[Docker] Health check failed.")
     print("[Docker] Sandbox ready.")
     return _sandbox
 
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
 
 IGNORE_DIRS = {".venv", "venv", "__pycache__", ".git", "node_modules", ".next"}
 
@@ -131,19 +173,20 @@ def run_bash_command(command: str, workspace_dir: str = "./") -> str:
 
 @tool
 def run_tests(workspace_dir: str = "./") -> str:
-    """Run pytest in the Docker sandbox and return the full test output. Use this to check if your changes pass tests."""
+    """Run pytest in the Docker sandbox and return the full test output."""
     container = get_sandbox(workspace_dir)
     result = container.exec_run(["bash", "-c", "pytest -x -q 2>&1"], workdir="/workspace", demux=False)
     output = (result.output or b"").decode()
     return output[:2000] + "\n[TRUNCATED]" if len(output) > 2000 else output
 
 
-# Git tools (run inside Docker sandbox)
 from tools.git_tools import create_branch, commit_changes, generate_pr_description
 from tools.semantic_search import semantic_search
 
-tools = [list_files, read_file, search_codebase, semantic_search, write_to_file,
-         run_bash_command, run_tests, create_branch, commit_changes, generate_pr_description]
+tools = [
+    list_files, read_file, search_codebase, semantic_search, write_to_file,
+    run_bash_command, run_tests, create_branch, commit_changes, generate_pr_description,
+]
 
 FALLBACK_MODELS = [
     "gemini/gemini-2.0-flash",
@@ -152,44 +195,17 @@ FALLBACK_MODELS = [
     "groq/llama3-8b-8192",
 ]
 
-_SKIP_ERRORS = ("ResourceExhausted", "RateLimit", "QuotaExceeded", "APIConnectionError", "AuthenticationError", "BadRequestError")
-
-# Transient errors that warrant a retry (rate limits, timeouts, connection issues).
-# Auth/bad-request errors are NOT retried — they won't self-heal.
-_TRANSIENT_ERROR_NAMES = ("RateLimitError", "ResourceExhausted", "APIConnectionError",
-                          "Timeout", "ConnectionError", "ServiceUnavailable", "InternalServerError")
-_TRANSIENT_EXCEPTIONS = (Exception,)  # broad catch; filtered by name in _invoke_model
-
-
-def _model_available(model: str) -> bool:
-    if model.startswith("gemini/") and not os.environ.get("GOOGLE_API_KEY") and not os.environ.get("GEMINI_API_KEY"):
-        return False
-    if model.startswith("groq/") and not os.environ.get("GROQ_API_KEY"):
-        return False
-    return True
-
-
-def _make_llm(model: str):
-    return ChatLiteLLM(model=model, temperature=0).bind_tools(tools)
-
-
-def _is_transient(e: Exception) -> bool:
-    """Return True if the exception is a transient API error worth retrying."""
-    name = type(e).__name__
-    msg = str(e).lower()
-    return (
-        any(t in name for t in _TRANSIENT_ERROR_NAMES) or
-        "rate limit" in msg or "timeout" in msg or "connection" in msg or
-        "503" in msg or "502" in msg or "529" in msg
-    )
+# ---------------------------------------------------------------------------
+# Shared helpers (used by agent nodes and base)
+# ---------------------------------------------------------------------------
 
 
 def _export_ui_state(state: dict, node: str = "") -> None:
-    """Export a serialisable subset of GraphState for the Streamlit UI."""
     cost_summary = _cost_tracker.get_summary()
     ui_state = {
         "iteration_count": state.get("iteration_count", 0),
         "current_node": node or state.get("current_node", "idle"),
+        "current_agent": state.get("current_agent", "idle"),
         "tests_passed": state.get("tests_passed"),
         "verification_attempts": state.get("verification_attempts", 0),
         "total_cost_usd": cost_summary["total_cost_usd"],
@@ -211,26 +227,301 @@ def _export_ui_state(state: dict, node: str = "") -> None:
     _state_manager.save_state(ui_state)
 
 
+# ---------------------------------------------------------------------------
+# Configure agents base runtime
+# ---------------------------------------------------------------------------
+
+from agents.base import configure_runtime
+
+executor_node = ToolNode(tools)
+configure_runtime(
+    cost_tracker=_cost_tracker,
+    circuit_breaker=_circuit_breaker,
+    circuit_events=_circuit_events,
+    fallback_models=FALLBACK_MODELS,
+    tools=tools,
+    executor_node=executor_node,
+    export_ui_state_fn=_export_ui_state,
+)
+
+# ---------------------------------------------------------------------------
+# Multi-agent nodes
+# ---------------------------------------------------------------------------
+
+from agents.manager import manager_node
+from agents.planner import planner_node as multi_planner_node
+from agents.coder import coder_node
+from agents.reviewer import reviewer_node
+
+# ---------------------------------------------------------------------------
+# Shared graph nodes (verify, git, executor)
+# ---------------------------------------------------------------------------
+
+
+def _track_tool_calls(state: GraphState) -> dict:
+    """Wrap ToolNode to track tool usage."""
+    global _semantic_search_call_count
+    last = state["messages"][-1]
+    writes = state.get("writes_performed", False)
+    searches = state.get("search_call_count", 0)
+    semantic_searches = state.get("semantic_search_call_count", 0)
+    wrote_this_turn = False
+    if hasattr(last, "tool_calls"):
+        for tc in last.tool_calls:
+            if tc["name"] == "write_to_file":
+                writes = True
+                wrote_this_turn = True
+            if tc["name"] == "search_codebase":
+                searches += 1
+            if tc["name"] == "semantic_search":
+                semantic_searches += 1
+                _semantic_search_call_count += 1
+    result = executor_node.invoke(state)
+    result["writes_performed"] = writes
+    result["search_call_count"] = searches
+    result["semantic_search_call_count"] = semantic_searches
+    result["current_node"] = "executor"
+    if wrote_this_turn:
+        result["tests_passed"] = None
+    _export_ui_state({**state, **result}, "executor")
+    return result
+
+
+def verify_code(state: GraphState) -> dict:
+    """Run pytest in the Docker sandbox and update tests_passed / test_output."""
+    print("\n--- [NODE] VERIFY ---")
+    workspace = state.get("workspace_dir", "./")
+    container = get_sandbox(workspace)
+    result = container.exec_run(["bash", "-c", "pytest -x -q 2>&1"], workdir="/workspace", demux=False)
+    exit_code = result.exit_code
+    output = (result.output or b"").decode()
+    output = output[:2000] + "\n[TRUNCATED]" if len(output) > 2000 else output
+
+    attempts = state.get("verification_attempts", 0) + 1
+
+    if exit_code == 0:
+        print(f"[VERIFY] Tests PASSED (attempt {attempts})")
+        return {
+            "tests_passed": True,
+            "test_output": "All tests passed.",
+            "verification_attempts": attempts,
+            "current_node": "verify",
+        }
+    else:
+        print(f"[VERIFY] Tests FAILED (attempt {attempts}):\n{output[:300]}")
+        error_msg = SystemMessage(content=f"Tests failed. Fix the following errors:\n{output}")
+        return {
+            "tests_passed": False,
+            "test_output": output,
+            "verification_attempts": attempts,
+            "messages": [error_msg],
+            "current_node": "verify",
+        }
+
+
+def git_workflow(state: GraphState) -> dict:
+    """Auto-create a branch and commit all changes after tests pass."""
+    print("\n--- [NODE] GIT WORKFLOW ---")
+    workspace = state.get("workspace_dir", "./")
+    timestamp = int(time.time())
+    branch = f"auto-swe/fix-{timestamp}"
+
+    from tools.git_tools import _run_in_sandbox
+    _run_in_sandbox(
+        'git config user.email "agent@auto-swe-agent" && git config user.name "auto-swe-agent"',
+        workspace,
+    )
+
+    exit_code, _ = _run_in_sandbox("git rev-parse --is-inside-work-tree", workspace)
+    if exit_code != 0:
+        print("[GIT] Not a git repo — skipping git workflow.")
+        return {"branch_name": None, "commit_hash": None, "current_node": "git_workflow"}
+
+    exit_code, out = _run_in_sandbox(f"git checkout -b {branch}", workspace)
+    if exit_code != 0:
+        print(f"[GIT] Branch creation failed: {out}")
+        return {"branch_name": None, "commit_hash": None, "current_node": "git_workflow"}
+    print(f"[GIT] Created branch: {branch}")
+
+    task_slug = state.get("current_task", "fix")[:50].strip()
+    commit_msg = f"auto-swe: {task_slug}"
+    _run_in_sandbox("git add -A", workspace)
+    exit_code, out = _run_in_sandbox(f'git commit -m "{commit_msg}"', workspace)
+    if exit_code != 0:
+        print(f"[GIT] Commit failed: {out}")
+        return {"branch_name": branch, "commit_hash": None, "current_node": "git_workflow"}
+
+    commit_hash = ""
+    for line in out.splitlines():
+        if line.startswith("["):
+            parts = line.split()
+            if len(parts) >= 2:
+                commit_hash = parts[1].rstrip("]")
+            break
+    print(f"[GIT] Committed: {commit_hash} — {commit_msg}")
+    return {"branch_name": branch, "commit_hash": commit_hash, "current_node": "git_workflow"}
+
+
+# ---------------------------------------------------------------------------
+# Routing functions (multi-agent)
+# ---------------------------------------------------------------------------
+
+
+def route_manager(state: GraphState) -> str:
+    return "end" if state.get("error_logs") else "planner"
+
+
+def route_planner(state: GraphState) -> str:
+    return "end" if state.get("error_logs") else "coder"
+
+
+def route_coder(state: GraphState) -> str:
+    if state.get("error_logs"):
+        return "end"
+    if state.get("budget_exceeded"):
+        print("[COST] Budget exceeded — routing to end.")
+        return "end"
+    last = state["messages"][-1]
+    if hasattr(last, "tool_calls") and last.tool_calls:
+        return "executor"
+    task = state.get("current_task", "")
+    is_multi_file = any(k in task.lower() for k in MULTI_FILE_KEYWORDS) or \
+                    state.get("search_call_count", 0) > 3
+    limit = 20 if is_multi_file else 15
+    if state["iteration_count"] >= limit:
+        print(f"[WARNING] Iteration limit ({limit}) reached. Forcing end.")
+        return "end"
+    if not state.get("writes_performed", False):
+        print("[GUARD] No files written yet — forcing back to coder.")
+        return "coder"
+    return "verify"
+
+
+def route_verify(state: GraphState) -> str:
+    if state.get("tests_passed"):
+        return "reviewer"
+    if state.get("verification_attempts", 0) < 3:
+        return "coder"
+    print("[VERIFY] Max verification attempts reached. Ending.")
+    return "end"
+
+
+def route_reviewer(state: GraphState) -> str:
+    review = state.get("review_feedback", state.get("messages", [{}])[-1].content if state.get("messages") else "").upper()
+    if "LGTM" in review:
+        global _review_feedbacks
+        _review_feedbacks.append("LGTM")
+        return "git_workflow"
+    _review_feedbacks.append("NEEDS_FIX")
+    return "coder"
+
+
+def route_git(state: GraphState) -> str:
+    return "end"
+
+
+# ---------------------------------------------------------------------------
+# Single-agent routing (backward compatible)
+# ---------------------------------------------------------------------------
+
+
+def route_planner_single(state: GraphState) -> str:
+    if state.get("budget_exceeded"):
+        print("[COST] Budget exceeded — routing to end.")
+        return "end"
+    task = state.get("current_task", "")
+    is_multi_file = any(k in task.lower() for k in MULTI_FILE_KEYWORDS) or \
+                    state.get("search_call_count", 0) > 3
+    limit = 20 if is_multi_file else 15
+    if state["iteration_count"] >= limit:
+        print(f"[WARNING] Iteration limit ({limit}) reached. Forcing end.")
+        return "end"
+    last = state["messages"][-1]
+    if hasattr(last, "tool_calls") and last.tool_calls:
+        return "executor"
+    if not state.get("writes_performed", False):
+        print("[GUARD] No files written yet — forcing back to planner.")
+        return "planner"
+    if state.get("tests_passed") is None:
+        return "verify"
+    return "end"
+
+
+def route_verify_single(state: GraphState) -> str:
+    if state.get("tests_passed"):
+        return "git_workflow"
+    if state.get("verification_attempts", 0) < 3:
+        return "planner"
+    print("[VERIFY] Max verification attempts reached. Ending.")
+    return "end"
+
+
+# ---------------------------------------------------------------------------
+# Single-agent node (old planner logic, kept for backward compat)
+# ---------------------------------------------------------------------------
+
+NO_WRITE_MSG = SystemMessage(content=(
+    "You have not written any files yet. You MUST use write_to_file to implement "
+    "the changes before finishing."
+))
+
+SINGLE_AGENT_SYSTEM = """You are an autonomous coding agent that fixes bugs and implements features. \
+You have access to the following tools in two categories:
+
+=== SEARCH TOOLS ===
+1. search_codebase(keyword, directory) — Exact text matching. \
+Use for finding specific strings, variable names, function references.
+2. semantic_search(query, k=5) — Semantic (meaning-based) search. \
+Use for finding code by concept or functionality. \
+Example: 'find where user authentication is handled' → semantic_search. \
+'find all occurrences of password' → search_codebase.
+
+=== FILE / EXECUTION TOOLS ===
+3. list_files(directory) — Show directory tree.
+4. read_file(filepath) — Read a file (truncated at 2000 lines).
+5. write_to_file(filepath, content) — Write/replace a file.
+6. run_bash_command(command, workspace_dir) — Execute bash inside Docker sandbox.
+7. run_tests(workspace_dir) — Run pytest inside Docker sandbox.
+
+=== GIT TOOLS ===
+8. create_branch(branch_name) — Create a new git branch.
+9. commit_changes(message) — Stage and commit all changes.
+10. generate_pr_description() — Generate a PR description from the diff.
+
+=== RULES ===
+- Always run tests (run_tests) after writing code to verify correctness.
+- If tests fail, read the error output and fix the code.
+- You MUST use write_to_file at least once before declaring the task done.
+- Prefer semantic_search for understanding code structure and finding logic; \
+use search_codebase only for exact string lookups.
+- You have up to 15 iterations (20 for multi-file tasks) to complete the task."""
+
+
 def _invoke_model(model: str, msgs: list, max_retries: int, base_delay: float, max_delay: float):
-    """Call a single model with exponential backoff on transient errors."""
+    from resilience.retry import with_retry
+    from agents.base import _is_transient
+    from langchain_community.chat_models import ChatLiteLLM
+
+    llm = ChatLiteLLM(model=model, temperature=0).bind_tools(tools)
+
     @with_retry(
         max_retries=max_retries,
         base_delay=base_delay,
         max_delay=max_delay,
         exponential_base=2.0,
-        retryable_exceptions=_TRANSIENT_EXCEPTIONS,
+        retryable_exceptions=(Exception,),
     )
     def _call():
         try:
-            return _make_llm(model).invoke(msgs)
+            return llm.invoke(msgs)
         except Exception as e:
             if _is_transient(e):
-                raise  # let with_retry handle it
-            raise  # non-transient: re-raise immediately (with_retry will also re-raise)
+                raise
+            raise
     return _call()
 
 
-def planner_node(state: GraphState) -> dict:
+def planner_node_single(state: GraphState) -> dict:
     trimmed = []
     for msg in state["messages"][-10:]:
         if hasattr(msg, "content") and isinstance(msg.content, str) and len(msg.content) > 4000:
@@ -240,14 +531,16 @@ def planner_node(state: GraphState) -> dict:
                                   tool_call_id=msg.tool_call_id)
         trimmed.append(msg)
     extra = [NO_WRITE_MSG] if not state.get("writes_performed", False) and state["iteration_count"] > 0 else []
-    msgs = [SYSTEM] + extra + trimmed
+    msgs = [SystemMessage(content=SINGLE_AGENT_SYSTEM)] + extra + trimmed
 
     for model in FALLBACK_MODELS:
-        if not _model_available(model):
+        if model.startswith("gemini/") and not os.environ.get("GOOGLE_API_KEY") and not os.environ.get("GEMINI_API_KEY"):
+            print(f"[SKIP] {model} — no API key set.")
+            continue
+        if model.startswith("groq/") and not os.environ.get("GROQ_API_KEY"):
             print(f"[SKIP] {model} — no API key set.")
             continue
 
-        # Circuit breaker check
         if not _circuit_breaker.can_call(model):
             event = f"[CIRCUIT OPEN] Skipping {model} (cooldown active)"
             print(event)
@@ -263,11 +556,8 @@ def planner_node(state: GraphState) -> dict:
                 max_delay=30.0,
             )
             _circuit_breaker.record_success(model)
-
-            # Track last successful model for UI
             state["last_model_used"] = model
 
-            # --- Cost tracking ---
             estimated = False
             usage = getattr(response, "usage_metadata", None) or \
                     getattr(response, "response_metadata", {}).get("usage", None)
@@ -292,7 +582,6 @@ def planner_node(state: GraphState) -> dict:
             total_cost = _cost_tracker.get_total_cost()
             print(f"[COST] ${total_cost:.6f} total | this call: in={input_tokens} out={output_tokens} tokens")
 
-            # Budget check
             if _cost_tracker.check_budget_exceeded():
                 print(f"[COST] Budget exceeded (${total_cost:.4f} > ${_cost_tracker.budget_usd}). Halting.")
                 budget_msg = SystemMessage(
@@ -321,9 +610,10 @@ def planner_node(state: GraphState) -> dict:
 
         except Exception as e:
             err_name = type(e).__name__
-            # Record circuit failure for transient errors; skip for auth/bad-request
-            is_permanent = any(t in err_name for t in _SKIP_ERRORS) or \
-                           "Missing" in str(e) or "key" in str(e).lower()
+            is_permanent = any(t in err_name for t in (
+                "ResourceExhausted", "RateLimit", "QuotaExceeded",
+                "APIConnectionError", "AuthenticationError", "BadRequestError",
+            )) or "Missing" in str(e) or "key" in str(e).lower()
             if not is_permanent:
                 _circuit_breaker.record_failure(model)
                 status = _circuit_breaker.get_status().get(model, {})
@@ -336,283 +626,127 @@ def planner_node(state: GraphState) -> dict:
     raise RuntimeError("All models in fallback chain exhausted.")
 
 
-executor_node = ToolNode(tools)
+# ---------------------------------------------------------------------------
+# Build graph (architecture selected by --single-agent flag)
+# ---------------------------------------------------------------------------
+
+_single_agent_mode = False
+app = None
 
 
-def _track_tool_calls(state: GraphState) -> dict:
-    """Wrap ToolNode to track write_to_file and search_codebase calls."""
-    global _semantic_search_call_count
-    last = state["messages"][-1]
-    writes = state.get("writes_performed", False)
-    searches = state.get("search_call_count", 0)
-    semantic_searches = state.get("semantic_search_call_count", 0)
-    wrote_this_turn = False
-    if hasattr(last, "tool_calls"):
-        for tc in last.tool_calls:
-            if tc["name"] == "write_to_file":
-                writes = True
-                wrote_this_turn = True
-            if tc["name"] == "search_codebase":
-                searches += 1
-            if tc["name"] == "semantic_search":
-                semantic_searches += 1
-                _semantic_search_call_count += 1
-    result = executor_node.invoke(state)
-    result["writes_performed"] = writes
-    result["search_call_count"] = searches
-    result["semantic_search_call_count"] = semantic_searches
-    result["current_node"] = "executor"
-    # Reset tests_passed to None whenever new files are written, so verify_code re-runs
-    if wrote_this_turn:
-        result["tests_passed"] = None
-    _export_ui_state({**state, **result}, "executor")
-    return result
+def _build_multi_agent_graph():
+    workflow = StateGraph(GraphState)
+    workflow.add_node("manager", manager_node)
+    workflow.add_node("planner", multi_planner_node)
+    workflow.add_node("coder", coder_node)
+    workflow.add_node("executor", _track_tool_calls)
+    workflow.add_node("verify", verify_code)
+    workflow.add_node("reviewer", reviewer_node)
+    workflow.add_node("git_workflow", git_workflow)
+
+    workflow.set_entry_point("manager")
+
+    workflow.add_conditional_edges("manager", route_manager, {
+        "planner": "planner", "end": END,
+    })
+    workflow.add_conditional_edges("planner", route_planner, {
+        "coder": "coder", "end": END,
+    })
+    workflow.add_conditional_edges("coder", route_coder, {
+        "executor": "executor", "verify": "verify", "end": END,
+    })
+    workflow.add_edge("executor", "coder")
+    workflow.add_conditional_edges("verify", route_verify, {
+        "reviewer": "reviewer", "coder": "coder", "end": END,
+    })
+    workflow.add_conditional_edges("reviewer", route_reviewer, {
+        "git_workflow": "git_workflow", "coder": "coder",
+    })
+    workflow.add_conditional_edges("git_workflow", route_git, {
+        "end": END,
+    })
+    return workflow.compile()
 
 
-def verify_code(state: GraphState) -> dict:
-    """Run pytest in the Docker sandbox and update tests_passed / test_output."""
-    print("\n--- [NODE] VERIFY ---")
-    workspace = state.get("workspace_dir", "./")
-    container = get_sandbox(workspace)
-    result = container.exec_run(["bash", "-c", "pytest -x -q 2>&1"], workdir="/workspace", demux=False)
-    exit_code = result.exit_code
-    output = (result.output or b"").decode()
-    output = output[:2000] + "\n[TRUNCATED]" if len(output) > 2000 else output
+def _build_single_agent_graph():
+    workflow = StateGraph(GraphState)
+    workflow.add_node("planner", planner_node_single)
+    workflow.add_node("executor", _track_tool_calls)
+    workflow.add_node("verify", verify_code)
+    workflow.add_node("git_workflow", git_workflow)
 
-    attempts = state.get("verification_attempts", 0) + 1
-
-    if exit_code == 0:
-        print(f"[VERIFY] Tests PASSED (attempt {attempts})")
-        result = {
-            "tests_passed": True,
-            "test_output": "All tests passed.",
-            "verification_attempts": attempts,
-            "current_node": "verify",
-        }
-        _export_ui_state({**state, **result}, "verify")
-        return result
-    else:
-        print(f"[VERIFY] Tests FAILED (attempt {attempts}):\n{output[:300]}")
-        # Inject failure message so planner sees the errors on next iteration
-        error_msg = SystemMessage(content=f"Tests failed. Fix the following errors:\n{output}")
-        result = {
-            "tests_passed": False,
-            "test_output": output,
-            "verification_attempts": attempts,
-            "messages": [error_msg],
-            "current_node": "verify",
-        }
-        _export_ui_state({**state, **result}, "verify")
-        return result
+    workflow.set_entry_point("planner")
+    workflow.add_conditional_edges("planner", route_planner_single, {
+        "executor": "executor", "end": END, "planner": "planner", "verify": "verify",
+    })
+    workflow.add_edge("executor", "planner")
+    workflow.add_conditional_edges("verify", route_verify_single, {
+        "planner": "planner", "git_workflow": "git_workflow", "end": END,
+    })
+    workflow.add_edge("git_workflow", END)
+    return workflow.compile()
 
 
-def git_workflow(state: GraphState) -> dict:
-    """Auto-create a branch and commit all changes after tests pass."""
-    print("\n--- [NODE] GIT WORKFLOW ---")
-    workspace = state.get("workspace_dir", "./")
-    timestamp = int(time.time())
-    branch = f"auto-swe/fix-{timestamp}"
-
-    # Ensure git identity is configured inside container
-    from tools.git_tools import _run_in_sandbox
-    _run_in_sandbox(
-        'git config user.email "agent@auto-swe-agent" && git config user.name "auto-swe-agent"',
-        workspace,
-    )
-
-    # Check if this is a git repo
-    exit_code, _ = _run_in_sandbox("git rev-parse --is-inside-work-tree", workspace)
-    if exit_code != 0:
-        print("[GIT] Not a git repo — skipping git workflow.")
-        result = {"branch_name": None, "commit_hash": None, "current_node": "git_workflow"}
-        _export_ui_state({**state, **result}, "git_workflow")
-        return result
-
-    # Create branch
-    exit_code, out = _run_in_sandbox(f"git checkout -b {branch}", workspace)
-    if exit_code != 0:
-        print(f"[GIT] Branch creation failed: {out}")
-        result = {"branch_name": None, "commit_hash": None, "current_node": "git_workflow"}
-        _export_ui_state({**state, **result}, "git_workflow")
-        return result
-    print(f"[GIT] Created branch: {branch}")
-
-    # Commit all changes
-    task_slug = state.get("current_task", "fix")[:50].strip()
-    commit_msg = f"auto-swe: {task_slug}"
-    _run_in_sandbox("git add -A", workspace)
-    exit_code, out = _run_in_sandbox(f'git commit -m "{commit_msg}"', workspace)
-    if exit_code != 0:
-        print(f"[GIT] Commit failed: {out}")
-        result = {"branch_name": branch, "commit_hash": None, "current_node": "git_workflow"}
-        _export_ui_state({**state, **result}, "git_workflow")
-        return result
-
-    # Parse commit hash
-    commit_hash = ""
-    for line in out.splitlines():
-        if line.startswith("["):
-            parts = line.split()
-            if len(parts) >= 2:
-                commit_hash = parts[1].rstrip("]")
-            break
-    print(f"[GIT] Committed: {commit_hash} — {commit_msg}")
-    result = {"branch_name": branch, "commit_hash": commit_hash, "current_node": "git_workflow"}
-    _export_ui_state({**state, **result}, "git_workflow")
-    return result
-
-
-MULTI_FILE_KEYWORDS = ("3 files", "multiple files", "several files", "all files")
-
-NO_WRITE_MSG = SystemMessage(content=(
-    "You have not written any files yet. You MUST use write_to_file to implement "
-    "the changes before finishing."
-))
-
-# Counters for semantic search usage (tracked per-run via module-level global)
-_semantic_search_call_count: int = 0
-
-SYSTEM = SystemMessage(content=(
-    "You are an autonomous coding agent that fixes bugs and implements features. "
-    "You have access to the following tools in two categories:\n\n"
-    "=== SEARCH TOOLS ===\n"
-    "1. search_codebase(keyword, directory) — Exact text matching. "
-    "Use for finding specific strings, variable names, function references.\n"
-    "2. semantic_search(query, k=5) — Semantic (meaning-based) search. "
-    "Use for finding code by concept or functionality. "
-    "Example: 'find where user authentication is handled' → semantic_search. "
-    "'find all occurrences of password' → search_codebase.\n\n"
-    "=== FILE / EXECUTION TOOLS ===\n"
-    "3. list_files(directory) — Show directory tree.\n"
-    "4. read_file(filepath) — Read a file (truncated at 2000 lines).\n"
-    "5. write_to_file(filepath, content) — Write/replace a file.\n"
-    "6. run_bash_command(command, workspace_dir) — Execute bash inside Docker sandbox.\n"
-    "7. run_tests(workspace_dir) — Run pytest inside Docker sandbox.\n\n"
-    "=== GIT TOOLS ===\n"
-    "8. create_branch(branch_name) — Create a new git branch.\n"
-    "9. commit_changes(message) — Stage and commit all changes.\n"
-    "10. generate_pr_description() — Generate a PR description from the diff.\n\n"
-    "=== RULES ===\n"
-    "- Always run tests (run_tests) after writing code to verify correctness.\n"
-    "- If tests fail, read the error output and fix the code.\n"
-    "- You MUST use write_to_file at least once before declaring the task done.\n"
-    "- Prefer semantic_search for understanding code structure and finding logic;\n"
-    "  use search_codebase only for exact string lookups.\n"
-    "- You have up to 15 iterations (20 for multi-file tasks) to complete the task."
-))
-
-
-def route_planner(state: GraphState) -> str:
-    """Route after planner: executor → verify → planner cycle."""
-    # Budget halt — stop immediately
-    if state.get("budget_exceeded"):
-        print("[COST] Budget exceeded — routing to end.")
-        return "end"
-
-    task = state.get("current_task", "")
-    is_multi_file = any(k in task.lower() for k in MULTI_FILE_KEYWORDS) or \
-                    state.get("search_call_count", 0) > 3
-    limit = 20 if is_multi_file else 15
-    if state["iteration_count"] >= limit:
-        print(f"[WARNING] Iteration limit ({limit}) reached. Forcing end.")
-        return "end"
-
-    last = state["messages"][-1]
-    if hasattr(last, "tool_calls") and last.tool_calls:
-        return "executor"
-
-    # Hallucination guard: agent claims done but never wrote anything
-    if not state.get("writes_performed", False):
-        print("[GUARD] No files written yet — forcing back to planner.")
-        return "no_write_guard"
-
-    # Agent claims done and has written files — run verification first
-    if state.get("tests_passed") is None:
-        return "verify"
-
-    return "end"
-
-
-def route_verify(state: GraphState) -> str:
-    """Route after verify_code: git_workflow on pass, planner on failure (max 3), else end."""
-    if state.get("tests_passed"):
-        return "git_workflow"
-    if state.get("verification_attempts", 0) < 3:
-        return "planner"
-    print("[VERIFY] Max verification attempts reached. Ending.")
-    return "end"
-
-
-# Build graph
-workflow = StateGraph(GraphState)
-workflow.add_node("planner", planner_node)
-workflow.add_node("executor", _track_tool_calls)
-workflow.add_node("verify", verify_code)
-workflow.add_node("git_workflow", git_workflow)
-
-workflow.set_entry_point("planner")
-workflow.add_conditional_edges(
-    "planner", route_planner,
-    {"executor": "executor", "end": END, "no_write_guard": "planner", "verify": "verify"}
-)
-workflow.add_edge("executor", "planner")
-workflow.add_conditional_edges(
-    "verify", route_verify,
-    {"planner": "planner", "git_workflow": "git_workflow", "end": END}
-)
-workflow.add_edge("git_workflow", END)
-
-app = workflow.compile()
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 
 def main():
+    global _single_agent_mode, app, _semantic_search_call_count, _agent_call_counts, _review_feedbacks
+
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("task", nargs="?", default=None)
     parser.add_argument("--workspace", default="./")
-    parser.add_argument("--budget", type=float, default=5.0,
-                        help="Max spend in USD (0 = disable tracking)")
-    parser.add_argument("--retry-max", type=int, default=3,
-                        help="Max retries per model before fallback (default: 3)")
-    parser.add_argument("--retry-delay", type=float, default=2.0,
-                        help="Base delay in seconds for exponential backoff (default: 2.0)")
-    parser.add_argument("--circuit-threshold", type=int, default=5,
-                        help="Consecutive failures before circuit opens (default: 5)")
-    parser.add_argument("--circuit-timeout", type=int, default=300,
-                        help="Seconds before retrying an open circuit (default: 300)")
+    parser.add_argument("--budget", type=float, default=5.0)
+    parser.add_argument("--retry-max", type=int, default=3)
+    parser.add_argument("--retry-delay", type=float, default=2.0)
+    parser.add_argument("--circuit-threshold", type=int, default=5)
+    parser.add_argument("--circuit-timeout", type=int, default=300)
+    parser.add_argument("--single-agent", action="store_true",
+                        help="Use single-agent mode (backward-compatible planner-only)")
     args = parser.parse_args()
     task = args.task or input("Enter task: ")
     workspace = os.path.abspath(args.workspace)
 
-    # Reset module-level counters
-    global _semantic_search_call_count
+    _single_agent_mode = args.single_agent
     _semantic_search_call_count = 0
+    _agent_call_counts = {}
+    _review_feedbacks = []
 
-    # Auto-build code index if missing or stale
     from indexing.build_index import ensure_index_built
     ensure_index_built(workspace)
 
-    # Reset and configure the module-level tracker for this run
     _cost_tracker.reset()
     _cost_tracker.budget_usd = args.budget
-
-    # Reset and configure the module-level circuit breaker for this run
     _circuit_breaker.reset()
     _circuit_breaker.failure_threshold = args.circuit_threshold
     _circuit_breaker.recovery_timeout = args.circuit_timeout
     _circuit_events.clear()
 
+    mode = "single-agent" if _single_agent_mode else "multi-agent"
     print(f"Starting agent for task: {task}\nWorkspace: {workspace}\n"
+          f"Mode: {mode}\n"
           f"Budget: {'disabled' if args.budget == 0 else f'${args.budget:.2f}'}\n"
           f"Retry: max={args.retry_max} delay={args.retry_delay}s "
           f"| Circuit: threshold={args.circuit_threshold} timeout={args.circuit_timeout}s\n")
 
-    final_state = app.invoke({
+    # Build the appropriate graph
+    if _single_agent_mode:
+        app = _build_single_agent_graph()
+    else:
+        app = _build_multi_agent_graph()
+
+    initial_state: GraphState = {
         "messages": [HumanMessage(content=f"Task: {task}")],
         "workspace_dir": workspace,
         "current_task": task,
         "error_logs": "",
         "plan": "",
+        "complexity": None,
+        "review_feedback": None,
+        "current_agent": None,
         "iteration_count": 0,
         "writes_performed": False,
         "search_call_count": 0,
@@ -626,7 +760,10 @@ def main():
         "budget_exceeded": False,
         "_retry_max": args.retry_max,
         "_retry_delay": args.retry_delay,
-    })
+        "last_model_used": None,
+    }
+
+    final_state = app.invoke(initial_state)
     print("\n=== FINAL ANSWER ===\n")
     content = final_state["messages"][-1].content
     if isinstance(content, list):
@@ -636,7 +773,6 @@ def main():
     summary = _cost_tracker.get_summary()
     most_used = summary.get("most_used_model") or "unknown"
 
-    # Print circuit breaker summary
     circuit_status = _circuit_breaker.get_status()
     open_circuits = [m for m, s in circuit_status.items() if s["state"] == "open"]
     if _circuit_events:
@@ -646,10 +782,11 @@ def main():
         if open_circuits:
             print(f"  Circuits still open: {', '.join(open_circuits)}")
 
-    # Export final state for UI (mark as completed)
     _export_ui_state({**final_state, "status": "completed"}, "end")
 
-    # Print SUMMARY line (parsed by eval harness)
+    lgtm_count = _review_feedbacks.count("LGTM")
+    needs_fix_count = _review_feedbacks.count("NEEDS_FIX")
+
     print(f"\n[SUMMARY] tests_passed={final_state.get('tests_passed')} | "
           f"verification_attempts={final_state.get('verification_attempts', 0)} | "
           f"branch_name={final_state.get('branch_name')} | "
@@ -659,7 +796,9 @@ def main():
           f"most_used_model={most_used} | "
           f"circuit_events={len(_circuit_events)} | "
           f"circuits_open={len(open_circuits)} | "
-          f"semantic_search_calls={_semantic_search_call_count}")
+          f"semantic_search_calls={_semantic_search_call_count} | "
+          f"lgtm={lgtm_count} | "
+          f"needs_fix={needs_fix_count}")
 
 
 if __name__ == "__main__":

@@ -163,6 +163,8 @@ if page == "🚀 Run Agent":
         )
         budget = st.slider("Budget ($)", 0.0, 20.0, 5.0, 0.5)
         workspace = st.text_input("Workspace", value=str(PROJECT_ROOT))
+        single_agent = st.checkbox("Single-agent mode", value=False,
+                                   help="Use legacy single-agent (planner-only) instead of multi-agent pipeline")
 
     col_a, col_b, col_c, col_d = st.columns(4)
     with col_a:
@@ -210,6 +212,8 @@ if page == "🚀 Run Agent":
             "--circuit-threshold", str(circuit_threshold),
             "--circuit-timeout", str(circuit_timeout),
         ]
+        if single_agent:
+            cmd.append("--single-agent")
         st.session_state.agent_process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -309,6 +313,23 @@ elif page == "📊 Live Monitor":
             st.subheader("Current Node")
             current_node = state.get("current_node", "idle")
             st.markdown(render_graph(current_node), unsafe_allow_html=True)
+
+            # Current agent badge
+            agent_colors = {
+                "manager": "#3b82f6", "planner": "#8b5cf6",
+                "coder": "#f59e0b", "reviewer": "#ef4444",
+                "executor": "#10b981", "verify": "#06b6d4",
+                "git_workflow": "#6b7280", None: "#6b7280", "idle": "#6b7280",
+            }
+            current_agent = state.get("current_agent") or "idle"
+            agent_color = agent_colors.get(current_agent, "#6b7280")
+            agent_label = current_agent.upper().replace("_", " ") if current_agent != "idle" else "IDLE"
+            st.markdown(
+                f'<div style="display:inline-block;background:{agent_color}20;'
+                f'border:2px solid {agent_color};border-radius:20px;padding:6px 18px;'
+                f'font-weight:700;font-size:16px;color:{agent_color}">{agent_label}</div>',
+                unsafe_allow_html=True,
+            )
 
             # Key metrics
             k1, k2, k3, k4, k5 = st.columns(5)

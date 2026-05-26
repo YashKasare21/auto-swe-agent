@@ -63,6 +63,8 @@ class EvalResult:
     circuit_events: int = 0
     circuits_open: int = 0
     semantic_search_calls: int = 0
+    lgtm_count: int = 0
+    needs_fix_count: int = 0
 
 
 CASES = [
@@ -172,6 +174,8 @@ def _extract_meta(output: str) -> tuple:
     circuit_events: int = 0
     circuits_open: int = 0
     semantic_search_calls: int = 0
+    lgtm_count: int = 0
+    needs_fix_count: int = 0
 
     for line in output.splitlines():
         if "[SUMMARY]" in line:
@@ -196,6 +200,8 @@ def _extract_meta(output: str) -> tuple:
                 circuit_events = int(_get("circuit_events"))
                 circuits_open = int(_get("circuits_open"))
                 semantic_search_calls = int(_get("semantic_search_calls"))
+                lgtm_count = int(_get("lgtm"))
+                needs_fix_count = int(_get("needs_fix"))
             except (IndexError, ValueError):
                 pass
             break
@@ -203,7 +209,7 @@ def _extract_meta(output: str) -> tuple:
     return (iterations, model, tests_passed, verification_attempts,
             branch_name, commit_hash, total_cost_usd, total_tokens,
             most_used_model, circuit_events, circuits_open,
-            semantic_search_calls)
+            semantic_search_calls, lgtm_count, needs_fix_count)
 
 
 def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
@@ -240,7 +246,7 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
         (iterations, model, agent_tests_passed, agent_verification_attempts,
          branch_name, commit_hash, total_cost_usd, total_tokens,
          most_used_model, circuit_events, circuits_open,
-         semantic_search_calls) = meta[:12]
+         semantic_search_calls, lgtm_count, needs_fix_count) = meta[:14]
 
         # Run validation
         passed = False
@@ -272,6 +278,8 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
             circuit_events=circuit_events,
             circuits_open=circuits_open,
             semantic_search_calls=semantic_search_calls,
+            lgtm_count=lgtm_count,
+            needs_fix_count=needs_fix_count,
         ))
 
         if case != cases[-1]:
@@ -286,8 +294,8 @@ def print_report(results: list[EvalResult]) -> None:
     print("EVAL REPORT")
     print(f"{'='*80}")
     print(f"| {'Case':<28} | {'Result':<6} | {'Iter':>4} | {'Verify':>6} | {'Cost':>8} | "
-          f"{'Tokens':>7} | {'Time':>6} | {'CE':>3} | {'SS':>3} |")
-    print(f"|{'-'*30}|{'-'*8}|{'-'*6}|{'-'*8}|{'-'*10}|{'-'*9}|{'-'*8}|{'-'*5}|{'-'*5}|")
+          f"{'Tokens':>7} | {'Time':>6} | {'CE':>3} | {'SS':>3} | {'LGTM':>4} | {'NF':>3} |")
+    print(f"|{'-'*30}|{'-'*8}|{'-'*6}|{'-'*8}|{'-'*10}|{'-'*9}|{'-'*8}|{'-'*5}|{'-'*5}|{'-'*6}|{'-'*5}|")
     for r in results:
         status = "PASS" if r.passed else "FAIL"
         tp = "✓" if r.tests_passed else ("✗" if r.tests_passed is False else "-")
@@ -295,13 +303,17 @@ def print_report(results: list[EvalResult]) -> None:
         ce_flag = " !" if r.circuits_open > 0 else ""
         print(f"| {r.case_id:<28} | {status:<6} | {r.iterations_used:>4} | {tp:>4}/{r.verification_attempts:<1} | "
               f"${r.total_cost_usd:>6.4f}{cost_flag} | {r.total_tokens:>7} | {r.time_taken:>5.1f}s | "
-              f"{r.circuit_events:>3}{ce_flag} | {r.semantic_search_calls:>3} |")
+              f"{r.circuit_events:>3}{ce_flag} | {r.semantic_search_calls:>3} | "
+              f"{r.lgtm_count:>4} | {r.needs_fix_count:>3} |")
     passed = sum(r.passed for r in results)
     total_cost = sum(r.total_cost_usd for r in results)
     total_ce = sum(r.circuit_events for r in results)
     total_ss = sum(r.semantic_search_calls for r in results)
+    total_lgtm = sum(r.lgtm_count for r in results)
+    total_nf = sum(r.needs_fix_count for r in results)
     print(f"\n{passed}/{len(results)} passed | Total cost: ${total_cost:.4f} | "
-          f"Total circuit events: {total_ce} | Total semantic searches: {total_ss}")
+          f"Total circuit events: {total_ce} | Total semantic searches: {total_ss} | "
+          f"LGTM: {total_lgtm} | NEEDS_FIX: {total_nf}")
 
     # Print circuit summary for any case with events
     for r in results:
