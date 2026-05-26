@@ -1,78 +1,224 @@
-# auto-swe-agent 🤖🛠️
+# Auto-SWE-Agent: Multi-Agent Autonomous Software Engineering Framework with Isolated Docker Sandboxing
 
-[![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![SWE-bench](https://img.shields.io/badge/SWE--bench%20Lite-TBD-blue?logo=google&logoColor=white)](#-swe-bench-lite-evaluation)
-[![Streamlit](https://img.shields.io/badge/Demo-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](ui/app.py)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![LangGraph](https://img.shields.io/badge/LangGraph-0.2.74-1C3C5E?logo=langchain&logoColor=white)](https://github.com/langchain-ai/langgraph)
+[![License](https://img.shields.io/badge/License-MIT-22C55E?logo=open-source-initiative&logoColor=white)](LICENSE)
+[![SWE-bench](https://img.shields.io/badge/SWE--bench%20Lite-Evaluation%20Ready-4285F4?logo=google&logoColor=white)](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Lite)
 [![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Code style](https://img.shields.io/badge/Code%20Style-Black-000000)](https://github.com/psf/black)
-
-> An autonomous software engineering agent that reads a natural language issue, explores a codebase,
-> implements the fix, runs tests, and commits the solution — all without human intervention.
-> Built with LangGraph, multi-agent orchestration, Docker sandboxing, and semantic code search.
+[![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](ui/app.py)
+[![Langfuse](https://img.shields.io/badge/Observability-Langfuse-000000?logo=langfuse&logoColor=white)](https://langfuse.com)
+[![Code Style](https://img.shields.io/badge/code%20style-black-000000)](https://github.com/psf/black)
 
 ---
 
-## 🎥 Demo
+An **autonomous multi-agent software engineering system** that ingests natural language issue descriptions, performs contextual codebase exploration, implements fixes through a coordinated agent pipeline, validates correctness via automated test execution within an isolated Docker sandbox, and persists changes through a structured git workflow — all without human intervention.
 
-<!-- TODO: Replace with actual demo GIF once recorded -->
-<!-- ![Agent Dashboard](assets/agent_flow.gif) -->
-
-![Live Dashboard](assets/demo_dashboard.png)
-*Real-time Streamlit UI showing agent progress, cost tracking, and circuit breaker status.*
+Built on **LangGraph** for stateful agent orchestration, **LiteLLM** for dynamic model routing, and **sentence-transformers** with FAISS for semantic code retrieval.
 
 ---
 
-## 📊 Results
+## Core Architecture Keywords
 
-| Benchmark | Score | Comparison |
-|-----------|-------|------------|
-| **SWE-bench Lite** | *TBD* | Early Devin: 13.86% |
-| **Golden Cases** (eval/run_eval.py) | 2/2 (100%) | Custom end-to-end tests |
-
-> Run `python -m swe_bench.run_swe_bench --num-tasks 300` to get the official score.
+| Paradigm | Implementation |
+|---|---|
+| **Agentic Design Patterns** | Specialized agent roles (Manager, Planner, Coder, Reviewer) with distinct system prompts and model tiers |
+| **LangGraph Orchestration** | Stateful directed graph with conditional routing, 7-node topology, and typed state propagation |
+| **Resilient Multi-Agent Coordination** | Functional routing with circuit breaker, exponential backoff, 4-model fallback chain, and hallucination guards |
+| **Sandbox Environments** | Docker SDK volume-mount isolation — all bash, pytest, and git commands execute inside `python:3.11-slim` containers |
+| **Vector Semantic Indexing** | AST-parsed code chunking → `all-MiniLM-L6-v2` embeddings → FAISS index with brute-force numpy fallback |
+| **Hybrid Search Architecture** | Keyword grep (`search_codebase`) + semantic vector search (`semantic_search`) for comprehensive code retrieval |
+| **Observability & Telemetry** | Langfuse tracing with structured spans, LLM generation metadata, routing decision logging, and custom evaluation scoring |
+| **Cost Governance** | Per-model token accounting with configurable USD budget thresholds and automated circuit termination |
 
 ---
 
-## 🏗️ Architecture
+## System Architecture Overview
 
-```mermaid
-graph TD
-    A[🐛 User Task] --> B[🧠 Manager Agent]
-    B --> C[📋 Planner Agent]
-    C --> D[💻 Coder Agent]
-    D --> E{🧪 Tests Pass?}
-    E -->|Yes| F[👁️ Reviewer Agent]
-    E -->|No, &lt;3 retries| D
-    E -->|No, ≥3 retries| G[⛔ End]
-    F -->|LGTM| H[🔧 Git Workflow]
-    F -->|NEEDS_FIX| D
-    H --> I[🌿 Branch + Commit]
-    I --> G
+The orchestration pipeline implements a **human-like division of labor** across four specialized LLM agents coordinated through a LangGraph state machine. Each agent operates with a distinct model tier and system prompt, mirroring the software engineering workflow of analysis → planning → implementation → review.
 
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style G fill:#f99,stroke:#333,stroke-width:2px
-    style I fill:#9f9,stroke:#333,stroke-width:2px
+![Multi-Agent Workflow](assets/architecture.png)
+*Figure 1: LangGraph state machine topology — 7-node multi-agent orchestration pipeline with conditional routing, verification loops, and review-based gates.*
+
+### Pipeline Topology
+
+```
+User Task → Manager → Planner → Coder ↔ Executor → Verify → Reviewer → Git Workflow → Done
 ```
 
-**Agent roles:**
+### Agent Roles & Model Allocation
 
-| Agent | Model | Responsibility |
-|-------|-------|----------------|
-| **Manager** | flash-lite | Analyzes task complexity, produces structured plan |
-| **Planner** | flash | Breaks plan into concrete implementation steps |
-| **Coder** | flash | Implements code using all available tools |
-| **Reviewer** | 70B | Reviews changes, outputs **LGTM** or **NEEDS_FIX** |
+| Node | Model Tier | Responsibility | System Prompt Focus |
+|---|---|---|---|
+| **Manager** | `flash-lite` | Task complexity analysis; outputs `COMPLEXITY`, `ITERATION_LIMIT`, `PLAN` sections | Structured problem decomposition, resource estimation |
+| **Planner** | `flash` | Decomposes plan into concrete, ordered implementation steps | Action sequencing, dependency identification |
+| **Coder** | `flash` | Implements code changes using all available tools (read, write, search, execute) | Implementation fidelity, test awareness |
+| **Reviewer** | 70B param | Evaluates patch quality; outputs `**LGTM**` or `**NEEDS_FIX**` | Code review standards, correctness verification |
+
+### Routing Semantics
+
+The graph employs **functional conditional routing** — each node's successor is determined by pure functions operating on the shared `GraphState` TypedDict (22 fields including `messages`, `workspace_dir`, `complexity`, `review_feedback`, `iteration_count`, `total_cost_usd`, `langfuse_trace_id`).
+
+| Transition | Condition | Fallback |
+|---|---|---|
+| Coder → Executor | Message contains tool calls | Route tools to ToolNode |
+| Coder → Verify | Writes performed, no pending tool calls | Escalate to test suite |
+| Coder → Coder | No writes performed (hallucination guard) | Force file creation |
+| Verify → Coder | Tests failed, retries < 3 | Return with error context |
+| Verify → Reviewer | Tests passed | Escalate to code review |
+| Reviewer → Coder | Output contains `NEEDS_FIX` | Return with review feedback |
+| Reviewer → Git Workflow | Output contains `LGTM` | Proceed to persistence |
 
 ---
 
-## 🚀 Quick Start
+## Production-Grade Resilience Features
+
+### Dynamic Model Fallback Chain
+
+The system maintains a prioritized model cascade that guarantees high availability across API provider failures:
+
+```python
+FALLBACK_MODELS = [
+    "gemini/gemini-2.0-flash",         # Primary — low latency, high throughput
+    "gemini/gemini-2.0-flash-lite",    # Fallback 1 — cost-optimized
+    "groq/llama-3.3-70b-versatile",    # Fallback 2 — high-quality open model
+    "groq/llama3-8b-8192",             # Fallback 3 — maximum availability
+]
+```
+
+Each model is gated by API key presence (`_model_available()` checks environment variables) and circuit breaker state before invocation. On transient failure (rate limit, 5xx, timeout), the system automatically escalates to the next available tier with exponential backoff.
+
+### Circuit Breaker Pattern
+
+A custom implementation in `resilience/circuit_breaker.py` provides per-model fault isolation:
+
+| Parameter | Default | Behavior |
+|---|---|---|
+| `failure_threshold` | 5 | Consecutive failures before circuit opens |
+| `recovery_timeout` | 300s | Cooldown window before half-open probe |
+| `success_threshold` | 2 | Successful calls needed to close circuit |
+
+The circuit transitions through three states — **CLOSED** (normal operation) → **OPEN** (fail-fast with no-op) → **HALF_OPEN** (probe with single request). State transitions are logged to `circuit_events` and surfaced in the Streamlit dashboard.
+
+### Hallucination Guard
+
+A critical safety mechanism in `route_coder()` prevents premature termination: if the agent asserts completion without executing a single `write_to_file` call, the router **forces** the workflow back to the Coder node. This check evaluates `state["writes_performed"]` — a boolean set to `True` only when the Executor node processes a `write_to_file` tool invocation.
+
+```python
+if not state.get("writes_performed", False):
+    print("[GUARD] No files written yet — forcing back to coder.")
+    return "coder"
+```
+
+### Context Windowing & Token Management
+
+To respect model context limits, the system implements a sliding window on message history (last 10 messages) and truncates tool outputs beyond 4000 characters. Token usage is tracked per-call for both input and output, enabling precise cost accounting.
+
+---
+
+## Repository Comprehensive Indexing
+
+The RAG subsystem in `indexing/` provides dual-mode code retrieval:
+
+### Indexing Pipeline
+
+```
+Source Files → [AST Parser] → Code Chunks → [Embedder] → Vector Store → [FAISS Index]
+                                                                   ↓
+                                                          [NumPy Fallback]
+```
+
+### Component Stack
+
+| Component | File | Details |
+|---|---|---|
+| **AST Parser** | `indexing/parser.py` | `stdlib.ast`-based function/class extraction; produces `CodeChunk` dataclasses with signature, docstring, and source context |
+| **Embedder** | `indexing/embedder.py` | Primary: `sentence-transformers/all-MiniLM-L6-v2` (384-dim). Fallback: bag-of-words TF-IDF via NumPy |
+| **Vector Store** | `indexing/vector_store.py` | Primary: FAISS `IndexFlatL2`. Fallback: brute-force cosine similarity via NumPy |
+| **Build CLI** | `indexing/build_index.py` | `ensure_index_built()` called at agent startup; staleness check via file mtime comparison |
+
+### Search Capabilities
+
+- **Semantic Search** (`tools/semantic_search.py`): LangChain `@tool`-decorated function that queries by conceptual meaning — e.g., "authentication flow" returns authentication-related code even without keyword matches.
+- **Keyword Search** (`search_codebase`): Regex-based grep across the codebase for exact pattern matching.
+
+Index size for typical repositories: **< 100 MB** (384-dim embeddings, CPU-buildable, no GPU required).
+
+---
+
+## Containerized Execution & Security
+
+All operational commands execute inside a **Docker sandbox** to prevent host contamination:
+
+### Sandbox Architecture
+
+![Docker Sandbox Isolation](assets/sandbox.png)
+*Figure 2: Docker-based execution isolation — workspace directory volume-mounted into a python:3.11-slim container. All tool execution, test runs, and git operations occur inside the sandbox.*
+
+```
+Host Process                          Docker Container (python:3.11-slim)
+┌──────────────────┐                 ┌──────────────────────────────────────┐
+│  agent.py        │  docker SDK     │  /workspace (volume mount)           │
+│  ToolNode        │ ──────────────► │  - my_repo/                          │
+│  - run_bash      │    exec_run     │  - tests/                            │
+│  - run_tests     │                 │  - modified files                    │
+│  - git commands  │                 │                                      │
+└──────────────────┘                 │  pytest -x -q                        │
+                                     │  git checkout -b auto-swe/fix-...    │
+                                     │  pip install [dependencies]          │
+                                     └──────────────────────────────────────┘
+```
+
+### Security Properties
+
+- **No host-side execution**: `run_bash_command`, `run_tests`, and all git operations route through `docker exec_run()`
+- **Volume isolation**: Workspace directory is mounted read-write; the container has no access to other host paths
+- **Container lifecycle**: A single persistent container (`python:3.11-slim` with git installed) is created at startup and reused across invocations — no per-call container overhead
+- **Dependency isolation**: The agent can `pip install` packages inside the container without affecting the host Python environment
+
+---
+
+## Streamlit Monitoring & Observability Dashboard
+
+The web UI in `ui/app.py` provides real-time diagnostic visibility into agent execution:
+
+### Dashboard Panels
+
+| Panel | Content |
+|---|---|
+| **Agent Graph** | Live LangGraph visualization (`ui/components/agent_graph.py`) highlighting the active node — 7-node multi-agent or 4-node single-agent layout |
+| **Current Agent Badge** | Color-coded indicator (Manager=blue, Planner=purple, Coder=amber, Reviewer=red, Executor=green, Verify=cyan, Git=gray) |
+| **Cost Breakdown** | Per-model cumulative spend, token counts, and budget meter with configurable `--budget` threshold |
+| **Circuit Status** | Open/closed state per model, circuit event log with timestamps, failure count per model |
+| **Metrics** | Iteration count, verification attempts, LGTM/NEEDS_FIX ratio, semantic search call count |
+| **Model Distribution** | Pie chart showing call distribution across the fallback chain |
+
+### Langfuse Observability
+
+When configured (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`), the system emits structured telemetry:
+
+| Trace Type | Granularity | Captured Data |
+|---|---|---|
+| **Agent Spans** | Per invocation | Node name, model, input preview, output status |
+| **LLM Generations** | Per call | Model, prompt tokens, completion tokens, latency |
+| **Tool Executions** | Per invocation | Tool name, arguments, result status, error messages |
+| **Routing Decisions** | Per transition | Source→target, iteration, tests_passed, budget status |
+| **Evaluation Scores** | Per run | `tests_passed` (1.0/0.0), `review_quality` (LGTM%), `search_efficiency` |
+
+Trace URLs are printed to stdout at the end of each run for direct navigation:
+
+```
+[LANGFUSE] Trace: https://cloud.langfuse.com/trace/abc123...
+```
+
+---
+
+## Quickstart & Configuration
 
 ### Prerequisites
 
-- Python 3.11+
-- Docker (for sandboxed execution)
-- At least one API key: [Gemini](https://aistudio.google.com/app/apikey), [Groq](https://console.groq.com/keys), or [OpenRouter](https://openrouter.ai/keys)
+- **Python 3.11+** — CPython runtime
+- **Docker** — Container runtime for sandboxed execution (Docker Engine 24+ or Docker Desktop)
+- **API Key** — At least one of: [Gemini](https://aistudio.google.com/app/apikey), [Groq](https://console.groq.com/keys), or [OpenRouter](https://openrouter.ai/keys)
 
 ### Installation
 
@@ -83,235 +229,182 @@ python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Run on any task
+### Environment Configuration
 
 ```bash
-# Set your API key
-export GEMINI_API_KEY=your_key_here
+# Required (at least one):
+export GEMINI_API_KEY="your_key"        # Primary model provider
+export GROQ_API_KEY="your_key"           # Open-source model provider
 
-# Run the agent
-python agent.py "The /add endpoint returns string concatenation instead of integer addition. Fix it so tests pass." --workspace ./
+# Optional:
+export LANGFUSE_PUBLIC_KEY="pk-lf-..."   # LLM observability
+export LANGFUSE_SECRET_KEY="sk-lf-..."   # LLM observability
+export LANGFUSE_HOST="https://cloud.langfuse.com"
 ```
 
-### Run with the Web UI
+### CLI Reference
+
+```bash
+# Run on any task (positional argument):
+python agent.py "Fix the /add endpoint — it returns string concatenation instead of integer addition" --workspace ./
+
+# With explicit flags:
+python agent.py \
+  --task "Implement retry logic in network client" \
+  --workspace ~/projects/my-repo \
+  --budget 3.0 \
+  --max-iterations 30 \
+  --output-dir ./agent_output
+
+# Single-agent mode (legacy, for A/B comparison):
+python agent.py --single-agent "Fix bug in auth module" --workspace ./
+
+# Full flag listing:
+python agent.py --help
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `task` (positional) | — | Natural language issue description |
+| `--workspace` | `./` | Target repository path |
+| `--budget` | `5.0` | Maximum USD spend (0 = unlimited) |
+| `--max-iterations` | `0` | Maximum graph iterations (0 = auto) |
+| `--single-agent` | `false` | Bypass multi-agent pipeline; use legacy planner-only |
+| `--output-dir` | `null` | Persist `final_answer.txt`, `patch.diff`, `state.json` |
+| `--retry-max` | `3` | LLM call retry limit per model |
+| `--retry-delay` | `2.0` | Base exponential backoff delay (seconds) |
+| `--circuit-threshold` | `5` | Consecutive failures before circuit opens |
+| `--circuit-timeout` | `300` | Circuit breaker recovery cooldown (seconds) |
+
+### Web UI
 
 ```bash
 streamlit run ui/app.py
 ```
 
-Then open `http://localhost:8501` in your browser.
+Opens at `http://localhost:8501` with live agent graph, cost dashboard, and circuit breaker monitoring.
 
-### Run SWE-bench Lite evaluation
-
-```bash
-python -m swe_bench.run_swe_bench --num-tasks 10
-```
-
----
-
-## 🧪 Features
-
-<details open>
-<summary><strong>Multi-Agent Orchestration</strong></summary>
-
-Four specialized agents in a pipeline — **Manager → Planner → Coder → Reviewer** — each with a different model and system prompt. The Manager analyzes complexity, the Planner creates detailed steps, the Coder implements, and the Reviewer validates before allowing a git commit.
-
-Supports `--single-agent` flag for A/B comparison against the legacy planner-only mode.
-</details>
-
-<details open>
-<summary><strong>Self-Verification Loop</strong></summary>
-
-After every code change, the agent runs `pytest` inside the Docker sandbox. If tests fail, it goes back to the Coder with the test output as context (up to 3 retries). If they pass, the Reviewer evaluates before committing.
-</details>
-
-<details open>
-<summary><strong>Semantic Code Search (RAG)</strong></summary>
-
-AST-based code chunker → sentence-transformers embeddings → FAISS vector index. The agent can search for code by **meaning**, not just keywords. Index auto-builds on first run with staleness checks.
+### Evaluation
 
 ```bash
-# Force rebuild the index
-python indexing/build_index.py .
-```
-</details>
+# Golden test cases (custom end-to-end):
+python eval/run_eval.py
 
-<details open>
-<summary><strong>Resilient LLM Calls</strong></summary>
-
-Four-model fallback chain with exponential backoff retry and circuit breaker:
-
-```
-gemini-2.0-flash → gemini-2.0-flash-lite → llama-3.3-70b → llama3-8b
-```
-
-If a model hits rate limits or throws transient errors, the system automatically falls through. After N consecutive failures, the circuit opens for a cooldown period.
-</details>
-
-<details open>
-<summary><strong>Cost Tracking</strong></summary>
-
-Per-run token and cost tracking with configurable budget alerts. Outputs detailed cost breakdown per model and per agent role. Supports `--budget` flag to halt execution when a dollar limit is reached.
-</details>
-
-<details open>
-<summary><strong>Observability with Langfuse</strong></summary>
-
-Full LLM tracing with custom scoring:
-- `tests_passed` — 1.0 if agent's tests pass
-- `review_quality` — LGTM ratio across iterations
-- `search_efficiency` — semantic search vs. total call ratio
-- Routing decisions, tool executions, and agent spans
-
-Set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` to enable.
-</details>
-
-<details open>
-<summary><strong>Docker Sandbox</strong></summary>
-
-All bash commands, test runs, and git operations execute inside an isolated `python:3.11-slim` container. The workspace is volume-mounted so changes persist, but the host is never exposed to arbitrary commands.
-</details>
-
----
-
-## 📁 Project Structure
-
-```
-auto-swe-agent/
-├── agent.py                   # Entry point: CLI, graph builder, routing
-├── agents/                    # Multi-agent architecture
-│   ├── base.py                #   Runtime: LLM invocation, fallback, cost tracking
-│   ├── manager.py             #   Manager: complexity analysis + structured plan
-│   ├── planner.py             #   Planner: implementation steps
-│   ├── coder.py               #   Coder: code implementation with all tools
-│   └── reviewer.py            #   Reviewer: LGTM / NEEDS_FIX evaluation
-├── indexing/                  # RAG semantic code search
-│   ├── parser.py              #   AST-based code chunking
-│   ├── embedder.py            #   sentence-transformers embeddings
-│   ├── vector_store.py        #   FAISS vector store with numpy fallback
-│   └── build_index.py         #   Index builder (CLI + auto-build)
-├── tools/
-│   ├── git_tools.py           #   Git operations (branch, commit, PR desc)
-│   └── semantic_search.py     #   Semantic code search tool (LangChain @tool)
-├── swe_bench/                 # SWE-bench Lite evaluation
-│   ├── harness.py             #   Dataset loading, workspace setup, agent runner
-│   └── run_swe_bench.py       #   CLI entry point
-├── observability/             # Langfuse tracing
-│   ├── langfuse_client.py     #   Client with graceful degradation
-│   └── tool_tracing.py        #   Tool execution tracing
-├── tracking/
-│   └── cost_tracker.py        #   Per-model cost accumulation + budget check
-├── resilience/
-│   └── circuit_breaker.py     #   Circuit breaker for LLM API calls
-├── eval/
-│   └── run_eval.py            # Golden eval harness (2 test cases)
-├── ui/
-│   ├── app.py                 # Streamlit web UI dashboard
-│   └── components/
-│       ├── agent_graph.py     #   LangGraph visualization
-│       └── cost_charts.py     #   Cost/usage charts
-├── scripts/
-│   ├── cost_report.py          #   Cost aggregation across evals
-│   ├── swe_bench_report.py     #   SWE-bench markdown report generator
-│   └── launch_ui.py            #   One-liner to start the UI
-├── docstream/                 # Target codebase for eval (PDF library stub)
-├── tests/                     # Pytest test suite
-├── Dockerfile                 # Docker sandbox image
-├── Makefile                   # Common commands
-├── requirements.txt           # Runtime dependencies
-└── requirements-dev.txt       # Dev dependencies (lint, type-check)
-```
-
----
-
-## 🔧 Configuration
-
-### Environment variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `GEMINI_API_KEY` or `GOOGLE_API_KEY` | For Gemini models | — | Google AI API key |
-| `GROQ_API_KEY` | For Groq models | — | Groq API key |
-| `OPENROUTER_API_KEY` | For OpenRouter | — | OpenRouter API key |
-| `LANGFUSE_PUBLIC_KEY` | For tracing | — | Langfuse public key |
-| `LANGFUSE_SECRET_KEY` | For tracing | — | Langfuse secret key |
-| `LANGFUSE_HOST` | For tracing | `https://cloud.langfuse.com` | Langfuse host URL |
-
-### CLI flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `task` (positional) | — | Issue description to solve |
-| `--workspace` | `./` | Workspace directory |
-| `--budget` | `5.0` | Dollar budget (0 = unlimited) |
-| `--max-iterations` | `0` | Max iterations (0 = auto) |
-| `--single-agent` | `false` | Legacy single-agent mode |
-| `--output-dir` | — | Write final answer & patch to dir |
-| `--retry-max` | `3` | Max retries per LLM call |
-| `--retry-delay` | `2.0` | Base retry delay (seconds) |
-| `--circuit-threshold` | `5` | Failures before circuit opens |
-| `--circuit-timeout` | `300` | Circuit cooldown (seconds) |
-
----
-
-## 📈 SWE-bench Lite Evaluation
-
-Evaluate against real GitHub issues from 12 popular Python repos.
-
-```bash
-# Run on 10 tasks
+# SWE-bench Lite (first 10 tasks):
 python -m swe_bench.run_swe_bench --num-tasks 10
 
-# Run specific tasks
+# SWE-bench specific instances:
 python -m swe_bench.run_swe_bench \
-    --instance-ids django__django-11011 django__django-11039
+  --instance-ids django__django-11011 django__django-11039
 
-# Generate report
+# Generate markdown report:
 python scripts/swe_bench_report.py -o SWE_BENCH_RESULTS.md
 ```
 
-### Baseline Comparison
+### Makefile Commands
 
-| Baseline | Score | Notes |
-|----------|-------|-------|
-| **auto-swe-agent** | *coming soon* | Multi-agent + RAG |
-| Devin (early) | 13.86% | [Cognition blog](https://www.cognition.ai/blog/introducing-devin) |
-| SWE-agent (default) | 12.47% | [arXiv:2405.15793](https://arxiv.org/abs/2405.15793) |
-| SWE-agent (with RAG) | 18.20% | Same paper, with retrieval augmentation |
-| OpenCode Interpreter | 23.17% | [OSLAB/OpenCodeInterpreter](https://github.com/OSLAB/OpenCodeInterpreter) |
-
----
-
-## 🛠️ Tech Stack
-
-| Component | Library |
-|-----------|---------|
-| Agent orchestration | [LangGraph](https://github.com/langchain-ai/langgraph) |
-| LLM routing | [LiteLLM](https://github.com/BerriAI/litellm) |
-| LLM interface | [LangChain](https://github.com/langchain-ai/langchain) |
-| Embeddings | [sentence-transformers](https://github.com/UKPLab/sentence-transformers) |
-| Vector search | [FAISS](https://github.com/facebookresearch/faiss) |
-| Sandbox | [Docker SDK for Python](https://docker-py.readthedocs.io/) |
-| Web UI | [Streamlit](https://streamlit.io/) |
-| Observability | [Langfuse](https://langfuse.com/) |
-| Testing | [pytest](https://pytest.org/) |
+```bash
+make install       # Install runtime dependencies
+make install-dev   # Install dev + runtime dependencies
+make test          # Run pytest suite
+make lint          # black + isort + mypy checks
+make format        # Auto-format with black + isort
+make ui            # Launch Streamlit dashboard
+make swe-bench     # Run SWE-bench Lite (10 tasks)
+make eval          # Run golden eval cases
+make clean         # Remove __pycache__ and .pytest_cache
+```
 
 ---
 
-## 🤝 Contributing
+## Benchmark Results
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and coding guidelines.
-
----
-
-## 📄 License
-
-MIT — see [LICENSE](LICENSE) for details.
+| Benchmark | Score | Context |
+|---|---|---|
+| **SWE-bench Lite** | *TBD (evaluation ready)* | 300 tasks across 12 Python repos |
+| **Golden Cases** | **2/2 (100%)** | Custom end-to-end tests in `eval/run_eval.py` |
 
 ---
 
-## 🙏 Acknowledgments
+## Repository Map
 
-- [SWE-bench](https://github.com/princeton-nlp/SWE-bench) — Princeton NLP for the benchmark dataset
-- [LangGraph](https://github.com/langchain-ai/langgraph) — LangChain for the graph framework
-- [Langfuse](https://langfuse.com/) — Open-source LLM observability
+```
+auto-swe-agent/
+├── agent.py                    # Entry point: graph builder, CLI, routing
+├── agents/                     # Multi-agent orchestration
+│   ├── base.py                 #   AgentRuntime: LLM invocation, fallback, cost tracking
+│   ├── manager.py              #   Manager: complexity analysis, structured plan
+│   ├── planner.py              #   Planner: implementation sequencing
+│   ├── coder.py                #   Coder: code implementation with tool bindings
+│   └── reviewer.py             #   Reviewer: LGTM / NEEDS_FIX evaluation
+├── indexing/                   # RAG semantic code search
+│   ├── parser.py               #   AST-based code chunking (stdlib ast)
+│   ├── embedder.py             #   sentence-transformers + TF-IDF fallback
+│   ├── vector_store.py         #   FAISS + NumPy brute-force fallback
+│   └── build_index.py          #   Index builder with staleness checks
+├── tools/                      # Agent tool implementations
+│   ├── git_tools.py            #   Branch creation, commit, PR description
+│   └── semantic_search.py      #   Semantic code search (@tool)
+├── swe_bench/                  # SWE-bench Lite evaluation harness
+│   ├── harness.py              #   Dataset loading, workspace setup, evaluation
+│   └── run_swe_bench.py        #   CLI entry point
+├── observability/              # Langfuse tracing integration
+│   ├── langfuse_client.py      #   Client with graceful degradation
+│   └── tool_tracing.py         #   Tool execution decorators
+├── tracking/
+│   └── cost_tracker.py         #   Per-model token accounting, budget enforcement
+├── resilience/
+│   └── circuit_breaker.py      #   Circuit breaker pattern implementation
+├── eval/
+│   └── run_eval.py             #   Golden test case harness
+├── ui/                         # Streamlit web dashboard
+│   ├── app.py                  #   Main application
+│   └── components/             #   Graph visualization, cost charts
+├── scripts/                    # Utility scripts
+├── tests/                      # Pytest unit tests
+├── assets/                     # Architecture diagrams, sandbox visualization
+├── Dockerfile                  # Sandbox container image
+└── Makefile                    # Build automation
+```
+
+---
+
+## Technology Stack
+
+| Layer | Component | Library |
+|---|---|---|
+| **Orchestration** | State machine | [LangGraph](https://github.com/langchain-ai/langgraph) 0.2.74 |
+| **LLM Routing** | Multi-provider gateway | [LiteLLM](https://github.com/BerriAI/litellm) 1.67.4 |
+| **LLM Interface** | Tool binding | [LangChain](https://github.com/langchain-ai/langchain) |
+| **Embeddings** | Text → Vector | [sentence-transformers](https://github.com/UKPLab/sentence-transformers) 2.2+ |
+| **Vector Search** | Approximate nearest neighbor | [FAISS](https://github.com/facebookresearch/faiss) 1.7+ |
+| **Container Runtime** | Process isolation | [Docker SDK](https://docker-py.readthedocs.io/) 7.1 |
+| **Web UI** | Real-time dashboard | [Streamlit](https://streamlit.io/) |
+| **Observability** | LLM telemetry | [Langfuse](https://langfuse.com/) |
+| **Testing** | Validation | [pytest](https://pytest.org/) 8.3 |
+| **Code Quality** | Formatting & types | Black, isort, mypy |
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and pull request guidelines.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+## Citation
+
+```bibtex
+@software{auto_swe_agent,
+  author = {Yash Kasare},
+  title = {Auto-SWE-Agent: Multi-Agent Autonomous Software Engineering Framework},
+  year = {2025},
+  url = {https://github.com/YashKasare21/auto-swe-agent}
+}
+```
