@@ -55,6 +55,8 @@ class EvalResult:
     error: str = ""
     tests_passed: Optional[bool] = None       # from agent's self-verification loop
     verification_attempts: int = 0            # how many fix retries the agent made
+    branch_name: Optional[str] = None         # git branch created by git_workflow node
+    commit_hash: Optional[str] = None         # git commit hash from git_workflow node
 
 
 CASES = [
@@ -146,29 +148,35 @@ def _run_agent(case: EvalCase, timeout: int = 120) -> tuple[int, str]:
     return result.returncode, (result.stdout + result.stderr).strip()
 
 
-def _extract_meta(output: str) -> tuple[int, str, Optional[bool], int]:
-    """Parse iteration count, model, tests_passed, and verification_attempts from agent stdout."""
+def _extract_meta(output: str) -> tuple[int, str, Optional[bool], int, Optional[str], Optional[str]]:
+    """Parse iteration count, model, tests_passed, verification_attempts, branch_name, commit_hash from agent stdout."""
     iterations = output.count("--- [NODE] PLANNER")
     model = "unknown"
     for line in output.splitlines():
         if "--- [NODE] PLANNER | model=" in line:
             model = line.split("model=")[-1].strip().rstrip("-").strip()
 
-    # Parse verification summary line printed by main()
+    # Parse [SUMMARY] line printed by main()
     tests_passed: Optional[bool] = None
     verification_attempts = 0
+    branch_name: Optional[str] = None
+    commit_hash: Optional[str] = None
     for line in output.splitlines():
-        if "[SUMMARY] tests_passed=" in line:
+        if "[SUMMARY]" in line:
             try:
                 tp_str = line.split("tests_passed=")[1].split("|")[0].strip()
                 tests_passed = True if tp_str == "True" else (False if tp_str == "False" else None)
-                va_str = line.split("verification_attempts=")[1].strip()
+                va_str = line.split("verification_attempts=")[1].split("|")[0].strip()
                 verification_attempts = int(va_str)
+                bn_str = line.split("branch_name=")[1].split("|")[0].strip()
+                branch_name = None if bn_str == "None" else bn_str
+                ch_str = line.split("commit_hash=")[1].strip()
+                commit_hash = None if ch_str == "None" else ch_str
             except (IndexError, ValueError):
                 pass
             break
 
-    return iterations, model, tests_passed, verification_attempts
+    return iterations, model, tests_passed, verification_attempts, branch_name, commit_hash
 
 
 def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
@@ -201,7 +209,7 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
         for line in agent_output.splitlines()[-5:]:
             print(f"    {line}")
 
-        iterations, model, agent_tests_passed, agent_verification_attempts = _extract_meta(agent_output)
+        iterations, model, agent_tests_passed, agent_verification_attempts, branch_name, commit_hash = _extract_meta(agent_output)
 
         # Run validation
         passed = False
@@ -225,6 +233,8 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
             error=error,
             tests_passed=agent_tests_passed,
             verification_attempts=agent_verification_attempts,
+            branch_name=branch_name,
+            commit_hash=commit_hash,
         ))
 
         if case != cases[-1]:
@@ -235,15 +245,16 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
 
 
 def print_report(results: list[EvalResult]) -> None:
-    print(f"\n{'='*60}")
+    print(f"\n{'='*70}")
     print("EVAL REPORT")
-    print(f"{'='*60}")
-    print(f"| {'Case':<30} | {'Result':<6} | {'Iter':>4} | {'Verify':>6} | {'Model':<30} | {'Time':>6} |")
-    print(f"|{'-'*32}|{'-'*8}|{'-'*6}|{'-'*8}|{'-'*32}|{'-'*8}|")
+    print(f"{'='*70}")
+    print(f"| {'Case':<30} | {'Result':<6} | {'Iter':>4} | {'Verify':>6} | {'Branch':<25} | {'Time':>6} |")
+    print(f"|{'-'*32}|{'-'*8}|{'-'*6}|{'-'*8}|{'-'*27}|{'-'*8}|")
     for r in results:
         status = "PASS" if r.passed else "FAIL"
         tp = "✓" if r.tests_passed else ("✗" if r.tests_passed is False else "-")
-        print(f"| {r.case_id:<30} | {status:<6} | {r.iterations_used:>4} | {tp:>4}/{r.verification_attempts:<1} | {r.model_used:<30} | {r.time_taken:>5.1f}s |")
+        branch = (r.branch_name or "-")[-25:]
+        print(f"| {r.case_id:<30} | {status:<6} | {r.iterations_used:>4} | {tp:>4}/{r.verification_attempts:<1} | {branch:<25} | {r.time_taken:>5.1f}s |")
     passed = sum(r.passed for r in results)
     print(f"\n{passed}/{len(results)} passed")
 
