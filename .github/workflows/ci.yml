@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Lint with black
+        run: black --check --diff .
+
+      - name: Lint with isort
+        run: isort --check-only --diff .
+
+      - name: Type check with mypy
+        run: mypy agent.py agents/ tools/ || true
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest tests/ test_main.py -v --tb=short
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || '' }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY || '' }}
+
+      - name: Verify agent.py compiles
+        run: python -c "import ast; ast.parse(open('agent.py').read())"
+
+      - name: Verify all packages import (no API keys needed)
+        run: |
+          python -c "from indexing.parser import CodeChunk, parse_file; print('indexing OK')"
+          python -c "from tracking.cost_tracker import CostTracker; print('tracking OK')"
+          python -c "from resilience.circuit_breaker import CircuitBreaker; print('resilience OK')"
+          python -c "from observability.langfuse_client import get_langfuse; print('observability OK')"
+          python -c "from swe_bench import SWEBenchHarness; print('swe_bench OK')"

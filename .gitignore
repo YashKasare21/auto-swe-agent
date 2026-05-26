@@ -29,3 +29,12 @@ eval/results_*.json
 # OS
 .DS_Store
 Thumbs.db
+
+# SWE-bench results
+swe_bench/results/
+
+# Generated report
+SWE_BENCH_RESULTS.md
+
+# Assets placeholders
+assets/*.placeholder
