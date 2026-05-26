@@ -1,9 +1,7 @@
-import sys
 import os
-from typing import Annotated, TypedDict
+from typing import Annotated, Optional, TypedDict
 
 import docker
-import litellm
 from langchain_community.chat_models import ChatLiteLLM
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
@@ -20,7 +18,6 @@ def get_sandbox(workspace_dir: str) -> docker.models.containers.Container:
     global _sandbox
     if _sandbox is not None:
         return _sandbox
-    # Reuse an existing sandbox container if one is already running
     existing = docker_client.containers.list(filters={"label": f"role={_SANDBOX_LABEL}"})
     if existing:
         _sandbox = existing[0]
@@ -44,12 +41,12 @@ def get_sandbox(workspace_dir: str) -> docker.models.containers.Container:
     )
     if exit_code != 0:
         raise RuntimeError(f"[Docker] pip install failed (exit {exit_code}):\n{output.decode()}")
-    # Health check
     exit_code, _ = _sandbox.exec_run(["python", "-c", "import fastapi, pytest, httpx, uvicorn"])
     if exit_code != 0:
         raise RuntimeError("[Docker] Health check failed — packages not importable after install.")
     print("[Docker] Sandbox ready.")
     return _sandbox
+
 
 IGNORE_DIRS = {".venv", "venv", "__pycache__", ".git", "node_modules", ".next"}
 
@@ -115,7 +112,16 @@ def run_bash_command(command: str, workspace_dir: str = "./") -> str:
     return f"stdout:\n{stdout}\nstderr:\n{stderr}"
 
 
-tools = [list_files, read_file, search_codebase, write_to_file, run_bash_command]
+@tool
+def run_tests(workspace_dir: str = "./") -> str:
+    """Run pytest in the Docker sandbox and return the full test output. Use this to check if your changes pass tests."""
+    container = get_sandbox(workspace_dir)
+    result = container.exec_run(["bash", "-c", "pytest -x -q 2>&1"], workdir="/workspace", demux=False)
+    output = (result.output or b"").decode()
+    return output[:2000] + "\n[TRUNCATED]" if len(output) > 2000 else output
+
+
+tools = [list_files, read_file, search_codebase, write_to_file, run_bash_command, run_tests]
 
 FALLBACK_MODELS = [
     "gemini/gemini-2.0-flash",
@@ -126,6 +132,7 @@ FALLBACK_MODELS = [
 
 _SKIP_ERRORS = ("ResourceExhausted", "RateLimit", "QuotaExceeded", "APIConnectionError", "AuthenticationError", "BadRequestError")
 
+
 def _model_available(model: str) -> bool:
     if model.startswith("gemini/") and not os.environ.get("GOOGLE_API_KEY") and not os.environ.get("GEMINI_API_KEY"):
         return False
@@ -133,13 +140,16 @@ def _model_available(model: str) -> bool:
         return False
     return True
 
+
 def _make_llm(model: str):
     return ChatLiteLLM(model=model, temperature=0).bind_tools(tools)
+
 
 SYSTEM = SystemMessage(content=(
     "You are an autonomous software engineer. Use list_files, read_file, and search_codebase "
     "to explore the codebase, then use write_to_file to implement fixes, and run_bash_command "
-    "to run tests and verify your changes. Do not just plan — actually implement and verify the fix. "
+    "to run tests and verify your changes. You can also call run_tests at any time to check "
+    "test status. Do not just plan — actually implement and verify the fix. "
     "When tests pass, state that the task is complete."
 ))
 
@@ -153,10 +163,13 @@ class GraphState(TypedDict):
     iteration_count: int
     writes_performed: bool
     search_call_count: int
+    # --- verification loop fields ---
+    tests_passed: Optional[bool]       # None=not yet run, True=pass, False=fail
+    test_output: Optional[str]         # stdout/stderr from last pytest run
+    verification_attempts: int         # number of fix retries so far
 
 
 def planner_node(state: GraphState) -> dict:
-    # Keep last 10 messages; truncate individual tool results to 4000 chars to stay under token limits
     trimmed = []
     for msg in state["messages"][-10:]:
         if hasattr(msg, "content") and isinstance(msg.content, str) and len(msg.content) > 4000:
@@ -165,7 +178,6 @@ def planner_node(state: GraphState) -> dict:
                 msg = ToolMessage(content=msg.content[:4000] + "\n[TRUNCATED]",
                                   tool_call_id=msg.tool_call_id)
         trimmed.append(msg)
-    # Inject guard message if agent hasn't written anything yet and is trying to finish
     extra = [NO_WRITE_MSG] if not state.get("writes_performed", False) and state["iteration_count"] > 0 else []
     msgs = [SYSTEM] + extra + trimmed
     for model in FALLBACK_MODELS:
@@ -192,16 +204,52 @@ def _track_tool_calls(state: GraphState) -> dict:
     last = state["messages"][-1]
     writes = state.get("writes_performed", False)
     searches = state.get("search_call_count", 0)
+    wrote_this_turn = False
     if hasattr(last, "tool_calls"):
         for tc in last.tool_calls:
             if tc["name"] == "write_to_file":
                 writes = True
+                wrote_this_turn = True
             if tc["name"] == "search_codebase":
                 searches += 1
     result = executor_node.invoke(state)
     result["writes_performed"] = writes
     result["search_call_count"] = searches
+    # Reset tests_passed to None whenever new files are written, so verify_code re-runs
+    if wrote_this_turn:
+        result["tests_passed"] = None
     return result
+
+
+def verify_code(state: GraphState) -> dict:
+    """Run pytest in the Docker sandbox and update tests_passed / test_output."""
+    print("\n--- [NODE] VERIFY ---")
+    workspace = state.get("workspace_dir", "./")
+    container = get_sandbox(workspace)
+    result = container.exec_run(["bash", "-c", "pytest -x -q 2>&1"], workdir="/workspace", demux=False)
+    exit_code = result.exit_code
+    output = (result.output or b"").decode()
+    output = output[:2000] + "\n[TRUNCATED]" if len(output) > 2000 else output
+
+    attempts = state.get("verification_attempts", 0) + 1
+
+    if exit_code == 0:
+        print(f"[VERIFY] Tests PASSED (attempt {attempts})")
+        return {
+            "tests_passed": True,
+            "test_output": "All tests passed.",
+            "verification_attempts": attempts,
+        }
+    else:
+        print(f"[VERIFY] Tests FAILED (attempt {attempts}):\n{output[:300]}")
+        # Inject failure message so planner sees the errors on next iteration
+        error_msg = SystemMessage(content=f"Tests failed. Fix the following errors:\n{output}")
+        return {
+            "tests_passed": False,
+            "test_output": output,
+            "verification_attempts": attempts,
+            "messages": [error_msg],
+        }
 
 
 MULTI_FILE_KEYWORDS = ("3 files", "multiple files", "several files", "all files")
@@ -213,7 +261,7 @@ NO_WRITE_MSG = SystemMessage(content=(
 
 
 def route_planner(state: GraphState) -> str:
-    """Route to executor if LLM made tool calls, otherwise end."""
+    """Route after planner: executor → verify → planner cycle."""
     task = state.get("current_task", "")
     is_multi_file = any(k in task.lower() for k in MULTI_FILE_KEYWORDS) or \
                     state.get("search_call_count", 0) > 3
@@ -221,13 +269,30 @@ def route_planner(state: GraphState) -> str:
     if state["iteration_count"] >= limit:
         print(f"[WARNING] Iteration limit ({limit}) reached. Forcing end.")
         return "end"
+
     last = state["messages"][-1]
     if hasattr(last, "tool_calls") and last.tool_calls:
         return "executor"
+
     # Hallucination guard: agent claims done but never wrote anything
     if not state.get("writes_performed", False):
         print("[GUARD] No files written yet — forcing back to planner.")
         return "no_write_guard"
+
+    # Agent claims done and has written files — run verification first
+    if state.get("tests_passed") is None:
+        return "verify"
+
+    return "end"
+
+
+def route_verify(state: GraphState) -> str:
+    """Route after verify_code: back to planner on failure (up to 3 attempts), else end."""
+    if state.get("tests_passed"):
+        return "end"
+    if state.get("verification_attempts", 0) < 3:
+        return "planner"
+    print("[VERIFY] Max verification attempts reached. Ending.")
     return "end"
 
 
@@ -235,13 +300,18 @@ def route_planner(state: GraphState) -> str:
 workflow = StateGraph(GraphState)
 workflow.add_node("planner", planner_node)
 workflow.add_node("executor", _track_tool_calls)
+workflow.add_node("verify", verify_code)
 
 workflow.set_entry_point("planner")
 workflow.add_conditional_edges(
     "planner", route_planner,
-    {"executor": "executor", "end": END, "no_write_guard": "planner"}
+    {"executor": "executor", "end": END, "no_write_guard": "planner", "verify": "verify"}
 )
 workflow.add_edge("executor", "planner")
+workflow.add_conditional_edges(
+    "verify", route_verify,
+    {"planner": "planner", "end": END}
+)
 
 app = workflow.compile()
 
@@ -264,12 +334,18 @@ def main():
         "iteration_count": 0,
         "writes_performed": False,
         "search_call_count": 0,
+        "tests_passed": None,
+        "test_output": None,
+        "verification_attempts": 0,
     })
     print("\n=== FINAL ANSWER ===\n")
     content = final_state["messages"][-1].content
     if isinstance(content, list):
         content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
     print(content)
+    # Print verification summary
+    print(f"\n[SUMMARY] tests_passed={final_state.get('tests_passed')} | "
+          f"verification_attempts={final_state.get('verification_attempts', 0)}")
 
 
 if __name__ == "__main__":
