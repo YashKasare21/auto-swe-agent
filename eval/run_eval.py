@@ -53,10 +53,13 @@ class EvalResult:
     model_used: str
     time_taken: float
     error: str = ""
-    tests_passed: Optional[bool] = None       # from agent's self-verification loop
-    verification_attempts: int = 0            # how many fix retries the agent made
-    branch_name: Optional[str] = None         # git branch created by git_workflow node
-    commit_hash: Optional[str] = None         # git commit hash from git_workflow node
+    tests_passed: Optional[bool] = None
+    verification_attempts: int = 0
+    branch_name: Optional[str] = None
+    commit_hash: Optional[str] = None
+    total_cost_usd: float = 0.0
+    total_tokens: int = 0
+    most_used_model: Optional[str] = None
 
 
 CASES = [
@@ -148,35 +151,44 @@ def _run_agent(case: EvalCase, timeout: int = 120) -> tuple[int, str]:
     return result.returncode, (result.stdout + result.stderr).strip()
 
 
-def _extract_meta(output: str) -> tuple[int, str, Optional[bool], int, Optional[str], Optional[str]]:
-    """Parse iteration count, model, tests_passed, verification_attempts, branch_name, commit_hash from agent stdout."""
+def _extract_meta(output: str) -> tuple[int, str, Optional[bool], int, Optional[str], Optional[str], float, int, Optional[str]]:
+    """Parse all fields from the [SUMMARY] line printed by agent main()."""
     iterations = output.count("--- [NODE] PLANNER")
     model = "unknown"
     for line in output.splitlines():
         if "--- [NODE] PLANNER | model=" in line:
             model = line.split("model=")[-1].strip().rstrip("-").strip()
 
-    # Parse [SUMMARY] line printed by main()
     tests_passed: Optional[bool] = None
     verification_attempts = 0
     branch_name: Optional[str] = None
     commit_hash: Optional[str] = None
+    total_cost_usd: float = 0.0
+    total_tokens: int = 0
+    most_used_model: Optional[str] = None
+
     for line in output.splitlines():
         if "[SUMMARY]" in line:
             try:
-                tp_str = line.split("tests_passed=")[1].split("|")[0].strip()
+                def _get(key: str) -> str:
+                    return line.split(f"{key}=")[1].split("|")[0].strip()
+
+                tp_str = _get("tests_passed")
                 tests_passed = True if tp_str == "True" else (False if tp_str == "False" else None)
-                va_str = line.split("verification_attempts=")[1].split("|")[0].strip()
-                verification_attempts = int(va_str)
-                bn_str = line.split("branch_name=")[1].split("|")[0].strip()
-                branch_name = None if bn_str == "None" else bn_str
-                ch_str = line.split("commit_hash=")[1].strip()
-                commit_hash = None if ch_str == "None" else ch_str
+                verification_attempts = int(_get("verification_attempts"))
+                bn = _get("branch_name")
+                branch_name = None if bn == "None" else bn
+                ch = _get("commit_hash")
+                commit_hash = None if ch == "None" else ch
+                total_cost_usd = float(_get("total_cost_usd"))
+                total_tokens = int(_get("total_tokens"))
+                mum = line.split("most_used_model=")[1].strip()
+                most_used_model = None if mum == "None" else mum
             except (IndexError, ValueError):
                 pass
             break
 
-    return iterations, model, tests_passed, verification_attempts, branch_name, commit_hash
+    return iterations, model, tests_passed, verification_attempts, branch_name, commit_hash, total_cost_usd, total_tokens, most_used_model
 
 
 def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
@@ -209,7 +221,7 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
         for line in agent_output.splitlines()[-5:]:
             print(f"    {line}")
 
-        iterations, model, agent_tests_passed, agent_verification_attempts, branch_name, commit_hash = _extract_meta(agent_output)
+        iterations, model, agent_tests_passed, agent_verification_attempts, branch_name, commit_hash, total_cost_usd, total_tokens, most_used_model = _extract_meta(agent_output)
 
         # Run validation
         passed = False
@@ -235,6 +247,9 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
             verification_attempts=agent_verification_attempts,
             branch_name=branch_name,
             commit_hash=commit_hash,
+            total_cost_usd=total_cost_usd,
+            total_tokens=total_tokens,
+            most_used_model=most_used_model,
         ))
 
         if case != cases[-1]:
@@ -245,18 +260,20 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
 
 
 def print_report(results: list[EvalResult]) -> None:
-    print(f"\n{'='*70}")
+    print(f"\n{'='*80}")
     print("EVAL REPORT")
-    print(f"{'='*70}")
-    print(f"| {'Case':<30} | {'Result':<6} | {'Iter':>4} | {'Verify':>6} | {'Branch':<25} | {'Time':>6} |")
-    print(f"|{'-'*32}|{'-'*8}|{'-'*6}|{'-'*8}|{'-'*27}|{'-'*8}|")
+    print(f"{'='*80}")
+    print(f"| {'Case':<28} | {'Result':<6} | {'Iter':>4} | {'Verify':>6} | {'Cost':>8} | {'Tokens':>7} | {'Time':>6} |")
+    print(f"|{'-'*30}|{'-'*8}|{'-'*6}|{'-'*8}|{'-'*10}|{'-'*9}|{'-'*8}|")
     for r in results:
         status = "PASS" if r.passed else "FAIL"
         tp = "✓" if r.tests_passed else ("✗" if r.tests_passed is False else "-")
-        branch = (r.branch_name or "-")[-25:]
-        print(f"| {r.case_id:<30} | {status:<6} | {r.iterations_used:>4} | {tp:>4}/{r.verification_attempts:<1} | {branch:<25} | {r.time_taken:>5.1f}s |")
+        cost_flag = " !" if r.total_cost_usd > 5.0 else ""
+        print(f"| {r.case_id:<28} | {status:<6} | {r.iterations_used:>4} | {tp:>4}/{r.verification_attempts:<1} | "
+              f"${r.total_cost_usd:>6.4f}{cost_flag} | {r.total_tokens:>7} | {r.time_taken:>5.1f}s |")
     passed = sum(r.passed for r in results)
-    print(f"\n{passed}/{len(results)} passed")
+    total_cost = sum(r.total_cost_usd for r in results)
+    print(f"\n{passed}/{len(results)} passed | Total cost: ${total_cost:.4f}")
 
 
 def save_results(results: list[EvalResult]) -> Path:
