@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 AGENT_DIR = Path(__file__).parent.parent
 VENV_PYTHON = AGENT_DIR / "venv" / "bin" / "python"
@@ -52,6 +53,8 @@ class EvalResult:
     model_used: str
     time_taken: float
     error: str = ""
+    tests_passed: Optional[bool] = None       # from agent's self-verification loop
+    verification_attempts: int = 0            # how many fix retries the agent made
 
 
 CASES = [
@@ -143,14 +146,29 @@ def _run_agent(case: EvalCase, timeout: int = 120) -> tuple[int, str]:
     return result.returncode, (result.stdout + result.stderr).strip()
 
 
-def _extract_meta(output: str) -> tuple[int, str]:
-    """Parse iteration count and model from agent stdout."""
+def _extract_meta(output: str) -> tuple[int, str, Optional[bool], int]:
+    """Parse iteration count, model, tests_passed, and verification_attempts from agent stdout."""
     iterations = output.count("--- [NODE] PLANNER")
     model = "unknown"
     for line in output.splitlines():
         if "--- [NODE] PLANNER | model=" in line:
             model = line.split("model=")[-1].strip().rstrip("-").strip()
-    return iterations, model
+
+    # Parse verification summary line printed by main()
+    tests_passed: Optional[bool] = None
+    verification_attempts = 0
+    for line in output.splitlines():
+        if "[SUMMARY] tests_passed=" in line:
+            try:
+                tp_str = line.split("tests_passed=")[1].split("|")[0].strip()
+                tests_passed = True if tp_str == "True" else (False if tp_str == "False" else None)
+                va_str = line.split("verification_attempts=")[1].strip()
+                verification_attempts = int(va_str)
+            except (IndexError, ValueError):
+                pass
+            break
+
+    return iterations, model, tests_passed, verification_attempts
 
 
 def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
@@ -183,7 +201,7 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
         for line in agent_output.splitlines()[-5:]:
             print(f"    {line}")
 
-        iterations, model = _extract_meta(agent_output)
+        iterations, model, agent_tests_passed, agent_verification_attempts = _extract_meta(agent_output)
 
         # Run validation
         passed = False
@@ -205,6 +223,8 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
             model_used=model,
             time_taken=elapsed,
             error=error,
+            tests_passed=agent_tests_passed,
+            verification_attempts=agent_verification_attempts,
         ))
 
         if case != cases[-1]:
@@ -218,11 +238,12 @@ def print_report(results: list[EvalResult]) -> None:
     print(f"\n{'='*60}")
     print("EVAL REPORT")
     print(f"{'='*60}")
-    print(f"| {'Case':<30} | {'Result':<6} | {'Iter':>4} | {'Model':<30} | {'Time':>6} |")
-    print(f"|{'-'*32}|{'-'*8}|{'-'*6}|{'-'*32}|{'-'*8}|")
+    print(f"| {'Case':<30} | {'Result':<6} | {'Iter':>4} | {'Verify':>6} | {'Model':<30} | {'Time':>6} |")
+    print(f"|{'-'*32}|{'-'*8}|{'-'*6}|{'-'*8}|{'-'*32}|{'-'*8}|")
     for r in results:
         status = "PASS" if r.passed else "FAIL"
-        print(f"| {r.case_id:<30} | {status:<6} | {r.iterations_used:>4} | {r.model_used:<30} | {r.time_taken:>5.1f}s |")
+        tp = "✓" if r.tests_passed else ("✗" if r.tests_passed is False else "-")
+        print(f"| {r.case_id:<30} | {status:<6} | {r.iterations_used:>4} | {tp:>4}/{r.verification_attempts:<1} | {r.model_used:<30} | {r.time_taken:>5.1f}s |")
     passed = sum(r.passed for r in results)
     print(f"\n{passed}/{len(results)} passed")
 
