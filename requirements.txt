@@ -1,3 +1,4 @@
+PyMuPDF>=1.23.0
 langgraph==0.2.74
 langchain-community==0.3.23
 langchain-core==0.3.84
