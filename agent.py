@@ -1,5 +1,8 @@
+import json
 import os
+import subprocess
 import time
+from pathlib import Path
 from typing import Annotated, Optional, TypedDict
 
 import docker
@@ -455,7 +458,7 @@ def route_coder(state: GraphState) -> str:
     task = state.get("current_task", "")
     is_multi_file = any(k in task.lower() for k in MULTI_FILE_KEYWORDS) or \
                     state.get("search_call_count", 0) > 3
-    limit = 20 if is_multi_file else 15
+    limit = _max_iterations_override if _max_iterations_override else (20 if is_multi_file else 15)
     if state["iteration_count"] >= limit:
         print(f"[WARNING] Iteration limit ({limit}) reached. Forcing end.")
         log_routing(state, "coder", "end")
@@ -530,7 +533,7 @@ def route_planner_single(state: GraphState) -> str:
     task = state.get("current_task", "")
     is_multi_file = any(k in task.lower() for k in MULTI_FILE_KEYWORDS) or \
                     state.get("search_call_count", 0) > 3
-    limit = 20 if is_multi_file else 15
+    limit = _max_iterations_override if _max_iterations_override else (20 if is_multi_file else 15)
     if state["iteration_count"] >= limit:
         print(f"[WARNING] Iteration limit ({limit}) reached. Forcing end.")
         return "end"
@@ -729,6 +732,7 @@ def planner_node_single(state: GraphState) -> dict:
 # ---------------------------------------------------------------------------
 
 _single_agent_mode = False
+_max_iterations_override = 0
 app = None
 
 
@@ -795,9 +799,17 @@ def main():
 
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("task", nargs="?", default=None)
-    parser.add_argument("--workspace", default="./")
+    parser.add_argument("task", nargs="?", default=None,
+                        help="Issue description to solve")
+    parser.add_argument("--task", dest="task_alias", default=None,
+                        help="Issue description to solve (alias for positional)")
+    parser.add_argument("--workspace", default="./",
+                        help="Workspace directory")
+    parser.add_argument("--output-dir", default=None,
+                        help="Directory to write final answer and patch")
     parser.add_argument("--budget", type=float, default=5.0)
+    parser.add_argument("--max-iterations", type=int, default=0,
+                        help="Max iterations (0=auto based on complexity)")
     parser.add_argument("--retry-max", type=int, default=3)
     parser.add_argument("--retry-delay", type=float, default=2.0)
     parser.add_argument("--circuit-threshold", type=int, default=5)
@@ -805,7 +817,7 @@ def main():
     parser.add_argument("--single-agent", action="store_true",
                         help="Use single-agent mode (backward-compatible planner-only)")
     args = parser.parse_args()
-    task = args.task or input("Enter task: ")
+    task = args.task or args.task_alias or input("Enter task: ")
     workspace = os.path.abspath(args.workspace)
 
     _single_agent_mode = args.single_agent
@@ -823,10 +835,15 @@ def main():
     _circuit_breaker.recovery_timeout = args.circuit_timeout
     _circuit_events.clear()
 
+    # Override iteration max if specified via CLI
+    _max_iterations_override = args.max_iterations
+
     mode = "single-agent" if _single_agent_mode else "multi-agent"
+    iter_info = f"max_iterations={args.max_iterations}" if args.max_iterations else "max_iterations=auto"
     print(f"Starting agent for task: {task}\nWorkspace: {workspace}\n"
           f"Mode: {mode}\n"
           f"Budget: {'disabled' if args.budget == 0 else f'${args.budget:.2f}'}\n"
+          f"{iter_info} | "
           f"Retry: max={args.retry_max} delay={args.retry_delay}s "
           f"| Circuit: threshold={args.circuit_threshold} timeout={args.circuit_timeout}s\n")
 
@@ -898,6 +915,58 @@ def main():
           f"semantic_search_calls={_semantic_search_call_count} | "
           f"lgtm={lgtm_count} | "
           f"needs_fix={needs_fix_count}")
+
+    # Write patch and final answer to output-dir if specified
+    if args.output_dir:
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Write final answer
+        answer_path = out_dir / "final_answer.txt"
+        answer_path.write_text(str(content))
+        print(f"[OUTPUT] Final answer -> {answer_path}")
+        # Write patch via git diff
+        patch_result = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=workspace, capture_output=True, text=True, timeout=30,
+        )
+        if patch_result.stdout.strip():
+            patch_path = out_dir / "patch.diff"
+            patch_path.write_text(patch_result.stdout)
+            print(f"[OUTPUT] Patch -> {patch_path}")
+        else:
+            # Check for untracked files
+            untracked = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=workspace, capture_output=True, text=True, timeout=30,
+            )
+            if untracked.stdout.strip():
+                patch_path = out_dir / "patch.diff"
+                combined = []
+                for f in untracked.stdout.strip().splitlines():
+                    fpath = Path(workspace) / f
+                    if fpath.is_file():
+                        content_f = fpath.read_text(encoding="utf-8", errors="replace")
+                        combined.append(f"--- /dev/null\n+++ b/{f}\n")
+                        for line in content_f.splitlines():
+                            combined.append(f"+{line}\n")
+                if combined:
+                    patch_path.write_text("".join(combined))
+                    print(f"[OUTPUT] New file patch -> {patch_path}")
+        # Write state summary
+        state_path = out_dir / "state.json"
+        state_path.write_text(json.dumps({
+            "tests_passed": final_state.get("tests_passed"),
+            "verification_attempts": final_state.get("verification_attempts", 0),
+            "branch_name": final_state.get("branch_name"),
+            "commit_hash": final_state.get("commit_hash"),
+            "total_cost_usd": summary["total_cost_usd"],
+            "total_tokens": summary["total_tokens"],
+            "most_used_model": most_used,
+            "lgtm_count": lgtm_count,
+            "needs_fix_count": needs_fix_count,
+            "semantic_search_calls": _semantic_search_call_count,
+        }, indent=2))
+        print(f"[OUTPUT] State summary -> {state_path}")
 
     # Langfuse observability: score and flush
     _score_run(final_state)
