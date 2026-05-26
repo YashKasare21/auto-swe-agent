@@ -1,3 +1,8 @@
+import fitz
+
+from docstream.core.extractor_v2 import ExtractionError
+
+
 class PDFExtractor:
     def __init__(self, file_path, password=None):
         self.file_path = file_path
@@ -7,4 +12,6 @@ class PDFExtractor:
             if self.password:
                 self.doc.authenticate(self.password)
             else:
-                raise ExtractionError("PDF is password protected. Pass password= to extract()")
+                raise ExtractionError(
+                    "PDF is password protected. Pass password= to extract()"
+                )

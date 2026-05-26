@@ -20,6 +20,7 @@ def trace_tool(tool_name: str) -> Callable:
     Note: For LangChain ToolNode execution, tracing happens automatically
     via trace_tool_execution() in the executor node wrapper.
     """
+
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs) -> Any:
@@ -35,13 +36,17 @@ def trace_tool(tool_name: str) -> Callable:
             try:
                 result = func(*args, **kwargs)
                 if span is not None:
-                    span.update(output={"status": "success", "result_length": len(str(result))})
+                    span.update(
+                        output={"status": "success", "result_length": len(str(result))}
+                    )
                 return result
             except Exception as e:
                 if span is not None:
                     span.update(output={"status": "error", "error": str(e)})
                 raise
+
         return wrapper
+
     return decorator
 
 

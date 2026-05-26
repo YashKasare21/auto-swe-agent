@@ -8,15 +8,15 @@ from typing import Annotated, Optional, TypedDict
 import docker
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from tracking.cost_tracker import CostTracker
-from resilience.circuit_breaker import CircuitBreaker
-from ui.state_manager import AgentStateManager
 from observability.langfuse_client import get_langfuse
 from observability.tool_tracing import trace_tool_execution
+from resilience.circuit_breaker import CircuitBreaker
+from tracking.cost_tracker import CostTracker
+from ui.state_manager import AgentStateManager
 
 # ---------------------------------------------------------------------------
 # GraphState — the shared state passed between all graph nodes
@@ -61,7 +61,9 @@ _SANDBOX_LABEL = "auto-swe-agent-sandbox"
 
 # Kept outside GraphState because TypedDict can't hold arbitrary class instances.
 _cost_tracker: CostTracker = CostTracker(budget_usd=5.0)
-_circuit_breaker: CircuitBreaker = CircuitBreaker(failure_threshold=5, recovery_timeout=300)
+_circuit_breaker: CircuitBreaker = CircuitBreaker(
+    failure_threshold=5, recovery_timeout=300
+)
 _circuit_events: list[str] = []
 _state_manager: AgentStateManager = AgentStateManager()
 
@@ -79,7 +81,9 @@ def get_sandbox(workspace_dir: str) -> docker.models.containers.Container:
     global _sandbox
     if _sandbox is not None:
         return _sandbox
-    existing = docker_client.containers.list(filters={"label": f"role={_SANDBOX_LABEL}"})
+    existing = docker_client.containers.list(
+        filters={"label": f"role={_SANDBOX_LABEL}"}
+    )
     if existing:
         _sandbox = existing[0]
         print(f"[Docker] Reusing sandbox: {_sandbox.short_id}")
@@ -101,8 +105,12 @@ def get_sandbox(workspace_dir: str) -> docker.models.containers.Container:
         demux=False,
     )
     if exit_code != 0:
-        raise RuntimeError(f"[Docker] pip install failed (exit {exit_code}):\n{output.decode()}")
-    exit_code, _ = _sandbox.exec_run(["python", "-c", "import fastapi, pytest, httpx, uvicorn"])
+        raise RuntimeError(
+            f"[Docker] pip install failed (exit {exit_code}):\n{output.decode()}"
+        )
+    exit_code, _ = _sandbox.exec_run(
+        ["python", "-c", "import fastapi, pytest, httpx, uvicorn"]
+    )
     if exit_code != 0:
         raise RuntimeError("[Docker] Health check failed.")
     print("[Docker] Sandbox ready.")
@@ -123,7 +131,11 @@ def list_files(directory: str) -> str:
     abs_dir = os.path.abspath(directory)
     for root, dirs, files in os.walk(abs_dir):
         dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
-        level = len(os.path.relpath(root, abs_dir).split(os.sep)) - 1 if root != abs_dir else 0
+        level = (
+            len(os.path.relpath(root, abs_dir).split(os.sep)) - 1
+            if root != abs_dir
+            else 0
+        )
         lines.append(f"{'  ' * level}{os.path.basename(root) or root}/")
         for f in files:
             lines.append(f"{'  ' * (level + 1)}{f}")
@@ -136,7 +148,10 @@ def read_file(filepath: str) -> str:
     with open(filepath, "r", errors="replace") as f:
         lines = f.readlines()
     if len(lines) > 2000:
-        return "".join(lines[:2000]) + "\n\n[WARNING: File truncated at 2000 lines to save context window.]"
+        return (
+            "".join(lines[:2000])
+            + "\n\n[WARNING: File truncated at 2000 lines to save context window.]"
+        )
     return "".join(lines)
 
 
@@ -161,7 +176,11 @@ def search_codebase(keyword: str, directory: str) -> str:
 @tool
 def write_to_file(filepath: str, content: str) -> str:
     """Write content to a file on the local filesystem (synced to the Docker sandbox via volume mount)."""
-    os.makedirs(os.path.dirname(filepath), exist_ok=True) if os.path.dirname(filepath) else None
+    (
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        if os.path.dirname(filepath)
+        else None
+    )
     with open(filepath, "w") as f:
         f.write(content)
     return f"Written to {filepath}"
@@ -171,7 +190,9 @@ def write_to_file(filepath: str, content: str) -> str:
 def run_bash_command(command: str, workspace_dir: str = "./") -> str:
     """Execute a bash command inside the Docker sandbox (in /workspace) and return stdout + stderr."""
     container = get_sandbox(workspace_dir)
-    result = container.exec_run(["bash", "-c", command], workdir="/workspace", demux=True)
+    result = container.exec_run(
+        ["bash", "-c", command], workdir="/workspace", demux=True
+    )
     stdout = (result.output[0] or b"").decode()
     stderr = (result.output[1] or b"").decode()
     return f"stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -181,17 +202,27 @@ def run_bash_command(command: str, workspace_dir: str = "./") -> str:
 def run_tests(workspace_dir: str = "./") -> str:
     """Run pytest in the Docker sandbox and return the full test output."""
     container = get_sandbox(workspace_dir)
-    result = container.exec_run(["bash", "-c", "pytest -x -q 2>&1"], workdir="/workspace", demux=False)
+    result = container.exec_run(
+        ["bash", "-c", "pytest -x -q 2>&1"], workdir="/workspace", demux=False
+    )
     output = (result.output or b"").decode()
     return output[:2000] + "\n[TRUNCATED]" if len(output) > 2000 else output
 
 
-from tools.git_tools import create_branch, commit_changes, generate_pr_description
+from tools.git_tools import commit_changes, create_branch, generate_pr_description
 from tools.semantic_search import semantic_search
 
 tools = [
-    list_files, read_file, search_codebase, semantic_search, write_to_file,
-    run_bash_command, run_tests, create_branch, commit_changes, generate_pr_description,
+    list_files,
+    read_file,
+    search_codebase,
+    semantic_search,
+    write_to_file,
+    run_bash_command,
+    run_tests,
+    create_branch,
+    commit_changes,
+    generate_pr_description,
 ]
 
 FALLBACK_MODELS = [
@@ -291,9 +322,9 @@ configure_runtime(
 # Multi-agent nodes
 # ---------------------------------------------------------------------------
 
+from agents.coder import coder_node
 from agents.manager import manager_node
 from agents.planner import planner_node as multi_planner_node
-from agents.coder import coder_node
 from agents.reviewer import reviewer_node
 
 # ---------------------------------------------------------------------------
@@ -356,7 +387,9 @@ def verify_code(state: GraphState) -> dict:
     print("\n--- [NODE] VERIFY ---")
     workspace = state.get("workspace_dir", "./")
     container = get_sandbox(workspace)
-    result = container.exec_run(["bash", "-c", "pytest -x -q 2>&1"], workdir="/workspace", demux=False)
+    result = container.exec_run(
+        ["bash", "-c", "pytest -x -q 2>&1"], workdir="/workspace", demux=False
+    )
     exit_code = result.exit_code
     output = (result.output or b"").decode()
     output = output[:2000] + "\n[TRUNCATED]" if len(output) > 2000 else output
@@ -373,7 +406,9 @@ def verify_code(state: GraphState) -> dict:
         }
     else:
         print(f"[VERIFY] Tests FAILED (attempt {attempts}):\n{output[:300]}")
-        error_msg = SystemMessage(content=f"Tests failed. Fix the following errors:\n{output}")
+        error_msg = SystemMessage(
+            content=f"Tests failed. Fix the following errors:\n{output}"
+        )
         return {
             "tests_passed": False,
             "test_output": output,
@@ -391,6 +426,7 @@ def git_workflow(state: GraphState) -> dict:
     branch = f"auto-swe/fix-{timestamp}"
 
     from tools.git_tools import _run_in_sandbox
+
     _run_in_sandbox(
         'git config user.email "agent@auto-swe-agent" && git config user.name "auto-swe-agent"',
         workspace,
@@ -399,12 +435,20 @@ def git_workflow(state: GraphState) -> dict:
     exit_code, _ = _run_in_sandbox("git rev-parse --is-inside-work-tree", workspace)
     if exit_code != 0:
         print("[GIT] Not a git repo — skipping git workflow.")
-        return {"branch_name": None, "commit_hash": None, "current_node": "git_workflow"}
+        return {
+            "branch_name": None,
+            "commit_hash": None,
+            "current_node": "git_workflow",
+        }
 
     exit_code, out = _run_in_sandbox(f"git checkout -b {branch}", workspace)
     if exit_code != 0:
         print(f"[GIT] Branch creation failed: {out}")
-        return {"branch_name": None, "commit_hash": None, "current_node": "git_workflow"}
+        return {
+            "branch_name": None,
+            "commit_hash": None,
+            "current_node": "git_workflow",
+        }
     print(f"[GIT] Created branch: {branch}")
 
     task_slug = state.get("current_task", "fix")[:50].strip()
@@ -413,7 +457,11 @@ def git_workflow(state: GraphState) -> dict:
     exit_code, out = _run_in_sandbox(f'git commit -m "{commit_msg}"', workspace)
     if exit_code != 0:
         print(f"[GIT] Commit failed: {out}")
-        return {"branch_name": branch, "commit_hash": None, "current_node": "git_workflow"}
+        return {
+            "branch_name": branch,
+            "commit_hash": None,
+            "current_node": "git_workflow",
+        }
 
     commit_hash = ""
     for line in out.splitlines():
@@ -423,7 +471,11 @@ def git_workflow(state: GraphState) -> dict:
                 commit_hash = parts[1].rstrip("]")
             break
     print(f"[GIT] Committed: {commit_hash} — {commit_msg}")
-    return {"branch_name": branch, "commit_hash": commit_hash, "current_node": "git_workflow"}
+    return {
+        "branch_name": branch,
+        "commit_hash": commit_hash,
+        "current_node": "git_workflow",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -456,9 +508,15 @@ def route_coder(state: GraphState) -> str:
         log_routing(state, "coder", "executor")
         return "executor"
     task = state.get("current_task", "")
-    is_multi_file = any(k in task.lower() for k in MULTI_FILE_KEYWORDS) or \
-                    state.get("search_call_count", 0) > 3
-    limit = _max_iterations_override if _max_iterations_override else (20 if is_multi_file else 15)
+    is_multi_file = (
+        any(k in task.lower() for k in MULTI_FILE_KEYWORDS)
+        or state.get("search_call_count", 0) > 3
+    )
+    limit = (
+        _max_iterations_override
+        if _max_iterations_override
+        else (20 if is_multi_file else 15)
+    )
     if state["iteration_count"] >= limit:
         print(f"[WARNING] Iteration limit ({limit}) reached. Forcing end.")
         log_routing(state, "coder", "end")
@@ -484,7 +542,10 @@ def route_verify(state: GraphState) -> str:
 
 
 def route_reviewer(state: GraphState) -> str:
-    review = state.get("review_feedback", state.get("messages", [{}])[-1].content if state.get("messages") else "").upper()
+    review = state.get(
+        "review_feedback",
+        state.get("messages", [{}])[-1].content if state.get("messages") else "",
+    ).upper()
     if "LGTM" in review:
         global _review_feedbacks
         _review_feedbacks.append("LGTM")
@@ -531,9 +592,15 @@ def route_planner_single(state: GraphState) -> str:
         print("[COST] Budget exceeded — routing to end.")
         return "end"
     task = state.get("current_task", "")
-    is_multi_file = any(k in task.lower() for k in MULTI_FILE_KEYWORDS) or \
-                    state.get("search_call_count", 0) > 3
-    limit = _max_iterations_override if _max_iterations_override else (20 if is_multi_file else 15)
+    is_multi_file = (
+        any(k in task.lower() for k in MULTI_FILE_KEYWORDS)
+        or state.get("search_call_count", 0) > 3
+    )
+    limit = (
+        _max_iterations_override
+        if _max_iterations_override
+        else (20 if is_multi_file else 15)
+    )
     if state["iteration_count"] >= limit:
         print(f"[WARNING] Iteration limit ({limit}) reached. Forcing end.")
         return "end"
@@ -561,10 +628,12 @@ def route_verify_single(state: GraphState) -> str:
 # Single-agent node (old planner logic, kept for backward compat)
 # ---------------------------------------------------------------------------
 
-NO_WRITE_MSG = SystemMessage(content=(
-    "You have not written any files yet. You MUST use write_to_file to implement "
-    "the changes before finishing."
-))
+NO_WRITE_MSG = SystemMessage(
+    content=(
+        "You have not written any files yet. You MUST use write_to_file to implement "
+        "the changes before finishing."
+    )
+)
 
 SINGLE_AGENT_SYSTEM = """You are an autonomous coding agent that fixes bugs and implements features. \
 You have access to the following tools in two categories:
@@ -598,10 +667,13 @@ use search_codebase only for exact string lookups.
 - You have up to 15 iterations (20 for multi-file tasks) to complete the task."""
 
 
-def _invoke_model(model: str, msgs: list, max_retries: int, base_delay: float, max_delay: float):
-    from resilience.retry import with_retry
-    from agents.base import _is_transient
+def _invoke_model(
+    model: str, msgs: list, max_retries: int, base_delay: float, max_delay: float
+):
     from langchain_community.chat_models import ChatLiteLLM
+
+    from agents.base import _is_transient
+    from resilience.retry import with_retry
 
     llm = ChatLiteLLM(model=model, temperature=0).bind_tools(tools)
 
@@ -619,23 +691,39 @@ def _invoke_model(model: str, msgs: list, max_retries: int, base_delay: float, m
             if _is_transient(e):
                 raise
             raise
+
     return _call()
 
 
 def planner_node_single(state: GraphState) -> dict:
     trimmed = []
     for msg in state["messages"][-10:]:
-        if hasattr(msg, "content") and isinstance(msg.content, str) and len(msg.content) > 4000:
+        if (
+            hasattr(msg, "content")
+            and isinstance(msg.content, str)
+            and len(msg.content) > 4000
+        ):
             from langchain_core.messages import ToolMessage
+
             if isinstance(msg, ToolMessage):
-                msg = ToolMessage(content=msg.content[:4000] + "\n[TRUNCATED]",
-                                  tool_call_id=msg.tool_call_id)
+                msg = ToolMessage(
+                    content=msg.content[:4000] + "\n[TRUNCATED]",
+                    tool_call_id=msg.tool_call_id,
+                )
         trimmed.append(msg)
-    extra = [NO_WRITE_MSG] if not state.get("writes_performed", False) and state["iteration_count"] > 0 else []
+    extra = (
+        [NO_WRITE_MSG]
+        if not state.get("writes_performed", False) and state["iteration_count"] > 0
+        else []
+    )
     msgs = [SystemMessage(content=SINGLE_AGENT_SYSTEM)] + extra + trimmed
 
     for model in FALLBACK_MODELS:
-        if model.startswith("gemini/") and not os.environ.get("GOOGLE_API_KEY") and not os.environ.get("GEMINI_API_KEY"):
+        if (
+            model.startswith("gemini/")
+            and not os.environ.get("GOOGLE_API_KEY")
+            and not os.environ.get("GEMINI_API_KEY")
+        ):
             print(f"[SKIP] {model} — no API key set.")
             continue
         if model.startswith("groq/") and not os.environ.get("GROQ_API_KEY"):
@@ -651,7 +739,8 @@ def planner_node_single(state: GraphState) -> dict:
         print(f"\n--- [NODE] PLANNER | model={model} ---")
         try:
             response = _invoke_model(
-                model, msgs,
+                model,
+                msgs,
                 max_retries=state.get("_retry_max", 3),
                 base_delay=state.get("_retry_delay", 2.0),
                 max_delay=30.0,
@@ -660,31 +749,46 @@ def planner_node_single(state: GraphState) -> dict:
             state["last_model_used"] = model
 
             estimated = False
-            usage = getattr(response, "usage_metadata", None) or \
-                    getattr(response, "response_metadata", {}).get("usage", None)
+            usage = getattr(response, "usage_metadata", None) or getattr(
+                response, "response_metadata", {}
+            ).get("usage", None)
             if usage:
                 input_tokens = (
-                    getattr(usage, "prompt_token_count", None) or
-                    getattr(usage, "input_tokens", None) or
-                    (usage.get("prompt_tokens") if isinstance(usage, dict) else None) or 0
+                    getattr(usage, "prompt_token_count", None)
+                    or getattr(usage, "input_tokens", None)
+                    or (usage.get("prompt_tokens") if isinstance(usage, dict) else None)
+                    or 0
                 )
                 output_tokens = (
-                    getattr(usage, "candidates_token_count", None) or
-                    getattr(usage, "output_tokens", None) or
-                    (usage.get("completion_tokens") if isinstance(usage, dict) else None) or 0
+                    getattr(usage, "candidates_token_count", None)
+                    or getattr(usage, "output_tokens", None)
+                    or (
+                        usage.get("completion_tokens")
+                        if isinstance(usage, dict)
+                        else None
+                    )
+                    or 0
                 )
             else:
                 input_tokens = len(msgs) * 500
                 output_tokens = len(str(response.content)) // 4
                 estimated = True
-                print(f"[COST] Token counts unavailable — using estimates (in={input_tokens}, out={output_tokens})")
+                print(
+                    f"[COST] Token counts unavailable — using estimates (in={input_tokens}, out={output_tokens})"
+                )
 
-            _cost_tracker.add_call(model, input_tokens, output_tokens, "planner", estimated)
+            _cost_tracker.add_call(
+                model, input_tokens, output_tokens, "planner", estimated
+            )
             total_cost = _cost_tracker.get_total_cost()
-            print(f"[COST] ${total_cost:.6f} total | this call: in={input_tokens} out={output_tokens} tokens")
+            print(
+                f"[COST] ${total_cost:.6f} total | this call: in={input_tokens} out={output_tokens} tokens"
+            )
 
             if _cost_tracker.check_budget_exceeded():
-                print(f"[COST] Budget exceeded (${total_cost:.4f} > ${_cost_tracker.budget_usd}). Halting.")
+                print(
+                    f"[COST] Budget exceeded (${total_cost:.4f} > ${_cost_tracker.budget_usd}). Halting."
+                )
                 budget_msg = SystemMessage(
                     content=f"Budget exceeded (${total_cost:.4f} > ${_cost_tracker.budget_usd}). Halting execution."
                 )
@@ -711,10 +815,21 @@ def planner_node_single(state: GraphState) -> dict:
 
         except Exception as e:
             err_name = type(e).__name__
-            is_permanent = any(t in err_name for t in (
-                "ResourceExhausted", "RateLimit", "QuotaExceeded",
-                "APIConnectionError", "AuthenticationError", "BadRequestError",
-            )) or "Missing" in str(e) or "key" in str(e).lower()
+            is_permanent = (
+                any(
+                    t in err_name
+                    for t in (
+                        "ResourceExhausted",
+                        "RateLimit",
+                        "QuotaExceeded",
+                        "APIConnectionError",
+                        "AuthenticationError",
+                        "BadRequestError",
+                    )
+                )
+                or "Missing" in str(e)
+                or "key" in str(e).lower()
+            )
             if not is_permanent:
                 _circuit_breaker.record_failure(model)
                 status = _circuit_breaker.get_status().get(model, {})
@@ -748,25 +863,56 @@ def _build_multi_agent_graph():
 
     workflow.set_entry_point("manager")
 
-    workflow.add_conditional_edges("manager", route_manager, {
-        "planner": "planner", "end": END,
-    })
-    workflow.add_conditional_edges("planner", route_planner, {
-        "coder": "coder", "end": END,
-    })
-    workflow.add_conditional_edges("coder", route_coder, {
-        "executor": "executor", "verify": "verify", "end": END,
-    })
+    workflow.add_conditional_edges(
+        "manager",
+        route_manager,
+        {
+            "planner": "planner",
+            "end": END,
+        },
+    )
+    workflow.add_conditional_edges(
+        "planner",
+        route_planner,
+        {
+            "coder": "coder",
+            "end": END,
+        },
+    )
+    workflow.add_conditional_edges(
+        "coder",
+        route_coder,
+        {
+            "executor": "executor",
+            "verify": "verify",
+            "end": END,
+        },
+    )
     workflow.add_edge("executor", "coder")
-    workflow.add_conditional_edges("verify", route_verify, {
-        "reviewer": "reviewer", "coder": "coder", "end": END,
-    })
-    workflow.add_conditional_edges("reviewer", route_reviewer, {
-        "git_workflow": "git_workflow", "coder": "coder",
-    })
-    workflow.add_conditional_edges("git_workflow", route_git, {
-        "end": END,
-    })
+    workflow.add_conditional_edges(
+        "verify",
+        route_verify,
+        {
+            "reviewer": "reviewer",
+            "coder": "coder",
+            "end": END,
+        },
+    )
+    workflow.add_conditional_edges(
+        "reviewer",
+        route_reviewer,
+        {
+            "git_workflow": "git_workflow",
+            "coder": "coder",
+        },
+    )
+    workflow.add_conditional_edges(
+        "git_workflow",
+        route_git,
+        {
+            "end": END,
+        },
+    )
     return workflow.compile()
 
 
@@ -778,13 +924,26 @@ def _build_single_agent_graph():
     workflow.add_node("git_workflow", git_workflow)
 
     workflow.set_entry_point("planner")
-    workflow.add_conditional_edges("planner", route_planner_single, {
-        "executor": "executor", "end": END, "planner": "planner", "verify": "verify",
-    })
+    workflow.add_conditional_edges(
+        "planner",
+        route_planner_single,
+        {
+            "executor": "executor",
+            "end": END,
+            "planner": "planner",
+            "verify": "verify",
+        },
+    )
     workflow.add_edge("executor", "planner")
-    workflow.add_conditional_edges("verify", route_verify_single, {
-        "planner": "planner", "git_workflow": "git_workflow", "end": END,
-    })
+    workflow.add_conditional_edges(
+        "verify",
+        route_verify_single,
+        {
+            "planner": "planner",
+            "git_workflow": "git_workflow",
+            "end": END,
+        },
+    )
     workflow.add_edge("git_workflow", END)
     return workflow.compile()
 
@@ -798,24 +957,37 @@ def main():
     global _single_agent_mode, app, _semantic_search_call_count, _agent_call_counts, _review_feedbacks
 
     import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("task", nargs="?", default=None,
-                        help="Issue description to solve")
-    parser.add_argument("--task", dest="task_alias", default=None,
-                        help="Issue description to solve (alias for positional)")
-    parser.add_argument("--workspace", default="./",
-                        help="Workspace directory")
-    parser.add_argument("--output-dir", default=None,
-                        help="Directory to write final answer and patch")
+    parser.add_argument(
+        "task", nargs="?", default=None, help="Issue description to solve"
+    )
+    parser.add_argument(
+        "--task",
+        dest="task_alias",
+        default=None,
+        help="Issue description to solve (alias for positional)",
+    )
+    parser.add_argument("--workspace", default="./", help="Workspace directory")
+    parser.add_argument(
+        "--output-dir", default=None, help="Directory to write final answer and patch"
+    )
     parser.add_argument("--budget", type=float, default=5.0)
-    parser.add_argument("--max-iterations", type=int, default=0,
-                        help="Max iterations (0=auto based on complexity)")
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=0,
+        help="Max iterations (0=auto based on complexity)",
+    )
     parser.add_argument("--retry-max", type=int, default=3)
     parser.add_argument("--retry-delay", type=float, default=2.0)
     parser.add_argument("--circuit-threshold", type=int, default=5)
     parser.add_argument("--circuit-timeout", type=int, default=300)
-    parser.add_argument("--single-agent", action="store_true",
-                        help="Use single-agent mode (backward-compatible planner-only)")
+    parser.add_argument(
+        "--single-agent",
+        action="store_true",
+        help="Use single-agent mode (backward-compatible planner-only)",
+    )
     args = parser.parse_args()
     task = args.task or args.task_alias or input("Enter task: ")
     workspace = os.path.abspath(args.workspace)
@@ -826,6 +998,7 @@ def main():
     _review_feedbacks = []
 
     from indexing.build_index import ensure_index_built
+
     ensure_index_built(workspace)
 
     _cost_tracker.reset()
@@ -839,13 +1012,19 @@ def main():
     _max_iterations_override = args.max_iterations
 
     mode = "single-agent" if _single_agent_mode else "multi-agent"
-    iter_info = f"max_iterations={args.max_iterations}" if args.max_iterations else "max_iterations=auto"
-    print(f"Starting agent for task: {task}\nWorkspace: {workspace}\n"
-          f"Mode: {mode}\n"
-          f"Budget: {'disabled' if args.budget == 0 else f'${args.budget:.2f}'}\n"
-          f"{iter_info} | "
-          f"Retry: max={args.retry_max} delay={args.retry_delay}s "
-          f"| Circuit: threshold={args.circuit_threshold} timeout={args.circuit_timeout}s\n")
+    iter_info = (
+        f"max_iterations={args.max_iterations}"
+        if args.max_iterations
+        else "max_iterations=auto"
+    )
+    print(
+        f"Starting agent for task: {task}\nWorkspace: {workspace}\n"
+        f"Mode: {mode}\n"
+        f"Budget: {'disabled' if args.budget == 0 else f'${args.budget:.2f}'}\n"
+        f"{iter_info} | "
+        f"Retry: max={args.retry_max} delay={args.retry_delay}s "
+        f"| Circuit: threshold={args.circuit_threshold} timeout={args.circuit_timeout}s\n"
+    )
 
     # Build the appropriate graph
     if _single_agent_mode:
@@ -903,18 +1082,20 @@ def main():
     lgtm_count = _review_feedbacks.count("LGTM")
     needs_fix_count = _review_feedbacks.count("NEEDS_FIX")
 
-    print(f"\n[SUMMARY] tests_passed={final_state.get('tests_passed')} | "
-          f"verification_attempts={final_state.get('verification_attempts', 0)} | "
-          f"branch_name={final_state.get('branch_name')} | "
-          f"commit_hash={final_state.get('commit_hash')} | "
-          f"total_cost_usd={summary['total_cost_usd']:.6f} | "
-          f"total_tokens={summary['total_tokens']} | "
-          f"most_used_model={most_used} | "
-          f"circuit_events={len(_circuit_events)} | "
-          f"circuits_open={len(open_circuits)} | "
-          f"semantic_search_calls={_semantic_search_call_count} | "
-          f"lgtm={lgtm_count} | "
-          f"needs_fix={needs_fix_count}")
+    print(
+        f"\n[SUMMARY] tests_passed={final_state.get('tests_passed')} | "
+        f"verification_attempts={final_state.get('verification_attempts', 0)} | "
+        f"branch_name={final_state.get('branch_name')} | "
+        f"commit_hash={final_state.get('commit_hash')} | "
+        f"total_cost_usd={summary['total_cost_usd']:.6f} | "
+        f"total_tokens={summary['total_tokens']} | "
+        f"most_used_model={most_used} | "
+        f"circuit_events={len(_circuit_events)} | "
+        f"circuits_open={len(open_circuits)} | "
+        f"semantic_search_calls={_semantic_search_call_count} | "
+        f"lgtm={lgtm_count} | "
+        f"needs_fix={needs_fix_count}"
+    )
 
     # Write patch and final answer to output-dir if specified
     if args.output_dir:
@@ -927,7 +1108,10 @@ def main():
         # Write patch via git diff
         patch_result = subprocess.run(
             ["git", "diff", "HEAD"],
-            cwd=workspace, capture_output=True, text=True, timeout=30,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if patch_result.stdout.strip():
             patch_path = out_dir / "patch.diff"
@@ -937,7 +1121,10 @@ def main():
             # Check for untracked files
             untracked = subprocess.run(
                 ["git", "ls-files", "--others", "--exclude-standard"],
-                cwd=workspace, capture_output=True, text=True, timeout=30,
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             if untracked.stdout.strip():
                 patch_path = out_dir / "patch.diff"
@@ -954,18 +1141,25 @@ def main():
                     print(f"[OUTPUT] New file patch -> {patch_path}")
         # Write state summary
         state_path = out_dir / "state.json"
-        state_path.write_text(json.dumps({
-            "tests_passed": final_state.get("tests_passed"),
-            "verification_attempts": final_state.get("verification_attempts", 0),
-            "branch_name": final_state.get("branch_name"),
-            "commit_hash": final_state.get("commit_hash"),
-            "total_cost_usd": summary["total_cost_usd"],
-            "total_tokens": summary["total_tokens"],
-            "most_used_model": most_used,
-            "lgtm_count": lgtm_count,
-            "needs_fix_count": needs_fix_count,
-            "semantic_search_calls": _semantic_search_call_count,
-        }, indent=2))
+        state_path.write_text(
+            json.dumps(
+                {
+                    "tests_passed": final_state.get("tests_passed"),
+                    "verification_attempts": final_state.get(
+                        "verification_attempts", 0
+                    ),
+                    "branch_name": final_state.get("branch_name"),
+                    "commit_hash": final_state.get("commit_hash"),
+                    "total_cost_usd": summary["total_cost_usd"],
+                    "total_tokens": summary["total_tokens"],
+                    "most_used_model": most_used,
+                    "lgtm_count": lgtm_count,
+                    "needs_fix_count": needs_fix_count,
+                    "semantic_search_calls": _semantic_search_call_count,
+                },
+                indent=2,
+            )
+        )
         print(f"[OUTPUT] State summary -> {state_path}")
 
     # Langfuse observability: score and flush

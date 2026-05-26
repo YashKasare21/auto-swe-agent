@@ -3,12 +3,13 @@
 Provides a LangChain tool that searches the codebase by meaning
 using the pre-built vector index.
 """
+
 from __future__ import annotations
 
 from langchain_core.tools import tool
 
 from indexing.embedder import CodeEmbedder
-from indexing.vector_store import CodeVectorStore, DEFAULT_INDEX_PATH
+from indexing.vector_store import DEFAULT_INDEX_PATH, CodeVectorStore
 
 # Module-level cache so the index is loaded once per agent run
 _store: CodeVectorStore | None = None

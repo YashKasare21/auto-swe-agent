@@ -4,20 +4,20 @@ Loads tasks from the SWE-bench Lite dataset, sets up workspaces by cloning
 repos at their base commits, runs the agent, extracts patches, and evaluates
 against the dataset's fail-to-pass tests.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-import sys
 
 from observability.langfuse_client import get_langfuse
 
@@ -50,6 +50,7 @@ class SWEBenchHarness:
     def dataset(self):
         if self._dataset is None:
             from datasets import load_dataset
+
             print(f"[SWE-bench] Loading {self.dataset_name} ({self.split} split)...")
             self._dataset = list(load_dataset(self.dataset_name, split=self.split))
             print(f"[SWE-bench] Loaded {len(self._dataset)} tasks")
@@ -103,9 +104,17 @@ class SWEBenchHarness:
         print(f"  [SETUP] Cloning {clone_url} @ {base_commit[:12]}...")
 
         result = subprocess.run(
-            ["git", "clone", clone_url, str(workspace),
-             "--depth", str(self.clone_depth)],
-            capture_output=True, text=True, timeout=300,
+            [
+                "git",
+                "clone",
+                clone_url,
+                str(workspace),
+                "--depth",
+                str(self.clone_depth),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         if result.returncode != 0:
             shutil.rmtree(workspace, ignore_errors=True)
@@ -115,17 +124,26 @@ class SWEBenchHarness:
 
         checkout = subprocess.run(
             ["git", "checkout", base_commit],
-            cwd=workspace, capture_output=True, text=True, timeout=120,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         if checkout.returncode != 0:
             # Try fetching the commit first
             subprocess.run(
                 ["git", "fetch", "--depth", "50", "origin", base_commit],
-                cwd=workspace, capture_output=True, text=True, timeout=120,
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
             checkout = subprocess.run(
                 ["git", "checkout", base_commit],
-                cwd=workspace, capture_output=True, text=True, timeout=120,
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
             if checkout.returncode != 0:
                 shutil.rmtree(workspace, ignore_errors=True)
@@ -135,8 +153,10 @@ class SWEBenchHarness:
                 )
 
         print(f"  [SETUP] Workspace ready at {workspace}")
-        print(f"  [SETUP] Repo head: "
-              f"{subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=workspace, capture_output=True, text=True).stdout.strip()}")
+        print(
+            f"  [SETUP] Repo head: "
+            f"{subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=workspace, capture_output=True, text=True).stdout.strip()}"
+        )
         return workspace
 
     # ------------------------------------------------------------------
@@ -158,10 +178,13 @@ class SWEBenchHarness:
         agent_py = Path(__file__).parent.parent / "agent.py"
 
         cmd = [
-            sys.executable, str(agent_py),
+            sys.executable,
+            str(agent_py),
             issue,
-            "--workspace", str(workspace),
-            "--budget", str(budget),
+            "--workspace",
+            str(workspace),
+            "--budget",
+            str(budget),
         ]
         if single_agent:
             cmd.append("--single-agent")
@@ -171,8 +194,11 @@ class SWEBenchHarness:
         start = time.time()
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=self.agent_timeout, cwd=str(Path(__file__).parent.parent),
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.agent_timeout,
+                cwd=str(Path(__file__).parent.parent),
                 env=env,
             )
         except subprocess.TimeoutExpired as e:
@@ -214,14 +240,20 @@ class SWEBenchHarness:
         """Return `git diff HEAD` from the workspace."""
         result = subprocess.run(
             ["git", "diff", "HEAD"],
-            cwd=workspace, capture_output=True, text=True, timeout=30,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode != 0:
             print(f"  [PATCH] git diff failed: {result.stderr.strip()[:200]}")
             return ""
         untracked = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard"],
-            cwd=workspace, capture_output=True, text=True, timeout=30,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         new_files = ""
         if untracked.stdout.strip():
@@ -270,12 +302,17 @@ class SWEBenchHarness:
         # Apply patch
         apply_result = subprocess.run(
             ["git", "apply", "--check"],
-            cwd=workspace, input=patch, text=True,
-            capture_output=True, timeout=30,
+            cwd=workspace,
+            input=patch,
+            text=True,
+            capture_output=True,
+            timeout=30,
         )
         if apply_result.returncode != 0:
-            print(f"  [EVAL] Patch does not apply cleanly: "
-                  f"{apply_result.stderr.strip()[:150]}")
+            print(
+                f"  [EVAL] Patch does not apply cleanly: "
+                f"{apply_result.stderr.strip()[:150]}"
+            )
             eval_report["setup_errors"].append(
                 f"Patch reject: {apply_result.stderr.strip()[:150]}"
             )
@@ -283,8 +320,11 @@ class SWEBenchHarness:
 
         subprocess.run(
             ["git", "apply"],
-            cwd=workspace, input=patch, text=True,
-            capture_output=True, timeout=30,
+            cwd=workspace,
+            input=patch,
+            text=True,
+            capture_output=True,
+            timeout=30,
         )
         eval_report["patch_applied"] = True
         print("  [EVAL] Patch applied cleanly")
@@ -292,14 +332,17 @@ class SWEBenchHarness:
         # Determine test command from dataset
         test_cmd = task.get("test_cmd", "").strip()
         if not test_cmd:
-            test_cmd = "pytest -x -q 2>&1" 
+            test_cmd = "pytest -x -q 2>&1"
         eval_report["test_cmd"] = test_cmd
 
         # Run tests
         print(f"  [EVAL] Running: {test_cmd}")
         test_result = subprocess.run(
             ["bash", "-c", test_cmd],
-            cwd=workspace, capture_output=True, text=True, timeout=300,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         test_output = (test_result.stdout or "") + (test_result.stderr or "")
         tests_passed = test_result.returncode == 0
@@ -382,7 +425,10 @@ class SWEBenchHarness:
             try:
                 workspace = self.setup_workspace(task)
                 agent_result = self.run_agent_on_task(
-                    task, workspace, budget=budget, single_agent=single_agent,
+                    task,
+                    workspace,
+                    budget=budget,
+                    single_agent=single_agent,
                 )
                 patch = self.extract_patch(workspace)
 
@@ -400,9 +446,7 @@ class SWEBenchHarness:
                 result["patch"] = patch
                 result["agent_result"] = agent_result
                 result["evaluation"] = eval_report
-                result["success"] = (
-                    eval_report["tests_passed"] is True
-                )
+                result["success"] = eval_report["tests_passed"] is True
 
             except Exception as e:
                 print(f"  [ERROR] {type(e).__name__}: {e}")
@@ -463,8 +507,7 @@ class SWEBenchHarness:
         successful = sum(1 for r in results if r.get("success"))
         errors = sum(1 for r in results if "error" in r)
         timed_out = sum(
-            1 for r in results
-            if r.get("agent_result", {}).get("timed_out")
+            1 for r in results if r.get("agent_result", {}).get("timed_out")
         )
         total_cost = 0.0
         total_tokens = 0
@@ -492,6 +535,3 @@ class SWEBenchHarness:
             "total_tokens": total_tokens,
             "results": results,
         }
-
-
-

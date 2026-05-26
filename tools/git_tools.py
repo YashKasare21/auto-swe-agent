@@ -1,4 +1,5 @@
 """Git tools for auto-swe-agent. All commands run inside the Docker sandbox."""
+
 import re
 from typing import List, Optional
 
@@ -9,8 +10,11 @@ def _run_in_sandbox(command: str, workspace_dir: str = "./") -> tuple[int, str]:
     """Run a shell command in the Docker sandbox, return (exit_code, output)."""
     # Import here to avoid circular imports with agent.py
     from agent import get_sandbox
+
     container = get_sandbox(workspace_dir)
-    result = container.exec_run(["bash", "-c", command], workdir="/workspace", demux=False)
+    result = container.exec_run(
+        ["bash", "-c", command], workdir="/workspace", demux=False
+    )
     output = (result.output or b"").decode().strip()
     return result.exit_code, output
 
@@ -21,7 +25,7 @@ def create_branch(branch_name: str, workspace_dir: str = "./") -> str:
     Branch name must be lowercase with hyphens only (no spaces or special chars).
     """
     # Validate branch name
-    if not re.match(r'^[a-z0-9/][a-z0-9\-/]*$', branch_name):
+    if not re.match(r"^[a-z0-9/][a-z0-9\-/]*$", branch_name):
         return f"Error: invalid branch name '{branch_name}'. Use lowercase letters, numbers, hyphens, and forward slashes only."
 
     exit_code, output = _run_in_sandbox(f"git checkout -b {branch_name}", workspace_dir)
@@ -31,7 +35,9 @@ def create_branch(branch_name: str, workspace_dir: str = "./") -> str:
 
 
 @tool
-def commit_changes(message: str, workspace_dir: str = "./", files: Optional[List[str]] = None) -> str:
+def commit_changes(
+    message: str, workspace_dir: str = "./", files: Optional[List[str]] = None
+) -> str:
     """Stage and commit changes in the Docker sandbox.
     If files is provided, only those files are staged; otherwise all changes are staged.
     Commit message is auto-prefixed with 'auto-swe: ' if not already present.
@@ -78,8 +84,12 @@ def generate_pr_description(workspace_dir: str = "./") -> str:
     Uses git diff HEAD~1 if commits exist, otherwise git diff for staged changes.
     """
     # Try diff against previous commit first
-    exit_code, diff = _run_in_sandbox("git diff HEAD~1 --stat 2>/dev/null || git diff --stat", workspace_dir)
-    _, full_diff = _run_in_sandbox("git diff HEAD~1 2>/dev/null || git diff", workspace_dir)
+    exit_code, diff = _run_in_sandbox(
+        "git diff HEAD~1 --stat 2>/dev/null || git diff --stat", workspace_dir
+    )
+    _, full_diff = _run_in_sandbox(
+        "git diff HEAD~1 2>/dev/null || git diff", workspace_dir
+    )
 
     # Truncate diff for context window
     if len(full_diff) > 3000:
@@ -94,7 +104,11 @@ def generate_pr_description(workspace_dir: str = "./") -> str:
             if fname:
                 changed_files.append(fname)
 
-    files_section = "\n".join(f"- `{f}`" for f in changed_files) if changed_files else "- (see diff)"
+    files_section = (
+        "\n".join(f"- `{f}`" for f in changed_files)
+        if changed_files
+        else "- (see diff)"
+    )
 
     pr_description = f"""## Changes
 

@@ -4,15 +4,25 @@ from typing import Any, Callable, Optional
 
 from langchain_community.chat_models import ChatLiteLLM
 from langchain_core.messages import SystemMessage
+
 from observability.langfuse_client import get_langfuse
 
 _SKIP_ERRORS = (
-    "ResourceExhausted", "RateLimit", "QuotaExceeded",
-    "APIConnectionError", "AuthenticationError", "BadRequestError",
+    "ResourceExhausted",
+    "RateLimit",
+    "QuotaExceeded",
+    "APIConnectionError",
+    "AuthenticationError",
+    "BadRequestError",
 )
 _TRANSIENT_ERROR_NAMES = (
-    "RateLimitError", "ResourceExhausted", "APIConnectionError",
-    "Timeout", "ConnectionError", "ServiceUnavailable", "InternalServerError",
+    "RateLimitError",
+    "ResourceExhausted",
+    "APIConnectionError",
+    "Timeout",
+    "ConnectionError",
+    "ServiceUnavailable",
+    "InternalServerError",
 )
 _TRANSIENT_EXCEPTIONS = (Exception,)
 
@@ -53,7 +63,11 @@ def get_runtime() -> AgentRuntime:
 
 
 def _model_available(model: str) -> bool:
-    if model.startswith("gemini/") and not os.environ.get("GOOGLE_API_KEY") and not os.environ.get("GEMINI_API_KEY"):
+    if (
+        model.startswith("gemini/")
+        and not os.environ.get("GOOGLE_API_KEY")
+        and not os.environ.get("GEMINI_API_KEY")
+    ):
         return False
     if model.startswith("groq/") and not os.environ.get("GROQ_API_KEY"):
         return False
@@ -69,8 +83,12 @@ def _is_transient(e: Exception) -> bool:
     msg = str(e).lower()
     return (
         any(t in name for t in _TRANSIENT_ERROR_NAMES)
-        or "rate limit" in msg or "timeout" in msg or "connection" in msg
-        or "503" in msg or "502" in msg or "529" in msg
+        or "rate limit" in msg
+        or "timeout" in msg
+        or "connection" in msg
+        or "503" in msg
+        or "502" in msg
+        or "529" in msg
     )
 
 
@@ -82,15 +100,18 @@ def _call_with_retry(model: str, msgs: list, max_retries: int, base_delay: float
         except Exception as e:
             if attempt >= max_retries or not _is_transient(e):
                 raise
-            delay = min(base_delay * (2.0 ** attempt), 30.0)
-            print(f"[RETRY] {model} attempt {attempt + 1}/{max_retries} failed ({type(e).__name__}). Retrying in {delay:.1f}s...")
+            delay = min(base_delay * (2.0**attempt), 30.0)
+            print(
+                f"[RETRY] {model} attempt {attempt + 1}/{max_retries} failed ({type(e).__name__}). Retrying in {delay:.1f}s..."
+            )
             time.sleep(delay)
     raise RuntimeError("Unreachable")
 
 
 def _extract_usage(response) -> Optional[dict]:
-    usage = getattr(response, "usage_metadata", None) or \
-            getattr(response, "response_metadata", {}).get("usage", None)
+    usage = getattr(response, "usage_metadata", None) or getattr(
+        response, "response_metadata", {}
+    ).get("usage", None)
     if usage is None:
         return None
     input_tokens = (
@@ -138,8 +159,13 @@ def invoke_agent(
 
     trimmed = []
     for msg in state["messages"][-context_window:]:
-        if hasattr(msg, "content") and isinstance(msg.content, str) and len(msg.content) > 4000:
+        if (
+            hasattr(msg, "content")
+            and isinstance(msg.content, str)
+            and len(msg.content) > 4000
+        ):
             from langchain_core.messages import ToolMessage
+
             if isinstance(msg, ToolMessage):
                 msg = ToolMessage(
                     content=msg.content[:4000] + "\n[TRUNCATED]",
@@ -177,7 +203,8 @@ def invoke_agent(
 
         try:
             response = _call_with_retry(
-                model, msgs,
+                model,
+                msgs,
                 max_retries=state.get("_retry_max", 3),
                 base_delay=state.get("_retry_delay", 2.0),
             )
@@ -192,7 +219,9 @@ def invoke_agent(
                 input_tokens = len(msgs) * 500
                 output_tokens = len(str(response.content)) // 4
                 estimated = True
-                print(f"[COST] Token counts unavailable — using estimates (in={input_tokens}, out={output_tokens})")
+                print(
+                    f"[COST] Token counts unavailable — using estimates (in={input_tokens}, out={output_tokens})"
+                )
 
             # Langfuse generation trace
             if langfuse.is_enabled() and trace_id:
@@ -201,21 +230,31 @@ def invoke_agent(
                     "name": f"llm-{node_name}",
                     "model": model,
                     "input": str(last_input)[:500],
-                    "output": str(response.content)[:1000] if hasattr(response, "content") else str(response)[:1000],
+                    "output": (
+                        str(response.content)[:1000]
+                        if hasattr(response, "content")
+                        else str(response)[:1000]
+                    ),
                 }
                 if usage_dict:
                     gen_params["usage"] = usage_dict
                 langfuse.generation(**gen_params)
 
-            cost_tracker.add_call(model, input_tokens, output_tokens, node_name, estimated)
+            cost_tracker.add_call(
+                model, input_tokens, output_tokens, node_name, estimated
+            )
             total_cost = cost_tracker.get_total_cost()
-            print(f"[COST] ${total_cost:.6f} total | this call: in={input_tokens} out={output_tokens} tokens")
+            print(
+                f"[COST] ${total_cost:.6f} total | this call: in={input_tokens} out={output_tokens} tokens"
+            )
 
             if agent_span is not None:
                 agent_span.update(output={"status": "success", "model_used": model})
 
             if cost_tracker.check_budget_exceeded():
-                print(f"[COST] Budget exceeded (${total_cost:.4f} > ${cost_tracker.budget_usd}).")
+                print(
+                    f"[COST] Budget exceeded (${total_cost:.4f} > ${cost_tracker.budget_usd})."
+                )
                 budget_msg = SystemMessage(
                     content=f"Budget exceeded (${total_cost:.4f} > ${cost_tracker.budget_usd}). Halting."
                 )
@@ -252,7 +291,8 @@ def invoke_agent(
             err_name = type(e).__name__
             is_permanent = (
                 any(t in err_name for t in _SKIP_ERRORS)
-                or "Missing" in str(e) or "key" in str(e).lower()
+                or "Missing" in str(e)
+                or "key" in str(e).lower()
             )
             if not is_permanent:
                 circuit_breaker.record_failure(model)
@@ -262,7 +302,9 @@ def invoke_agent(
                     circuit_events.append(event)
             print(f"[FALLBACK] {model} failed: {err_name}. Trying next model...")
             if agent_span is not None:
-                agent_span.update(output={"status": "fallback", "error": err_name, "model": model})
+                agent_span.update(
+                    output={"status": "fallback", "error": err_name, "model": model}
+                )
             continue
 
     if agent_span is not None:

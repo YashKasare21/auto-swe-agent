@@ -3,6 +3,7 @@
 The agent writes a JSON state file after each iteration; the Streamlit
 app reads it on a polling loop for real-time display.
 """
+
 from __future__ import annotations
 
 import json
@@ -35,7 +36,11 @@ class AgentStateManager:
             return False
         last_update = state.get("last_updated", 0)
         stale = time.time() - last_update > 30
-        return not stale and state.get("status") not in ("completed", "complete", "error")
+        return not stale and state.get("status") not in (
+            "completed",
+            "complete",
+            "error",
+        )
 
     def clear(self) -> None:
         if self.state_file.exists():

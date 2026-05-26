@@ -1,4 +1,5 @@
 """Aggregate and report costs across all eval result JSON files."""
+
 from __future__ import annotations
 
 import json
@@ -28,7 +29,10 @@ def print_report(records: list[dict]) -> None:
 
     total_cost = sum(r.get("total_cost_usd", 0.0) for r in records)
     total_tokens = sum(r.get("total_tokens", 0) for r in records)
-    costs = [(r["_file"] + " / " + r.get("case_id", "?"), r.get("total_cost_usd", 0.0)) for r in records]
+    costs = [
+        (r["_file"] + " / " + r.get("case_id", "?"), r.get("total_cost_usd", 0.0))
+        for r in records
+    ]
     costs_sorted = sorted(costs, key=lambda x: x[1], reverse=True)
 
     avg = total_cost / len(records) if records else 0.0
@@ -56,14 +60,20 @@ def _try_chart(records: list[dict]) -> None:
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        print("\n[INFO] matplotlib not installed — skipping chart. Run: pip install matplotlib")
+        print(
+            "\n[INFO] matplotlib not installed — skipping chart. Run: pip install matplotlib"
+        )
         return
 
     labels = [r.get("case_id", "?")[:20] + f"\n({r['_file'][-15:]})" for r in records]
     costs = [r.get("total_cost_usd", 0.0) for r in records]
 
     fig, ax = plt.subplots(figsize=(max(6, len(records) * 1.2), 4))
-    bars = ax.bar(range(len(labels)), costs, color=["#e74c3c" if c > 5.0 else "#3498db" for c in costs])
+    bars = ax.bar(
+        range(len(labels)),
+        costs,
+        color=["#e74c3c" if c > 5.0 else "#3498db" for c in costs],
+    )
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, fontsize=7)
     ax.set_ylabel("Cost (USD)")
@@ -71,8 +81,14 @@ def _try_chart(records: list[dict]) -> None:
     ax.axhline(5.0, color="red", linestyle="--", linewidth=0.8, label="$5 budget")
     ax.legend()
     for bar, cost in zip(bars, costs):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.0002,
-                f"${cost:.4f}", ha="center", va="bottom", fontsize=7)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.0002,
+            f"${cost:.4f}",
+            ha="center",
+            va="bottom",
+            fontsize=7,
+        )
 
     out = EVAL_DIR / "cost_chart.png"
     plt.tight_layout()

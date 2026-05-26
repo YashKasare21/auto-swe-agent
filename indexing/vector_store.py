@@ -3,6 +3,7 @@
 Uses inner-product (cosine similarity on L2-normalised vectors).
 Falls back to brute-force numpy search when FAISS is unavailable.
 """
+
 from __future__ import annotations
 
 import pickle
@@ -33,6 +34,7 @@ class CodeVectorStore:
         self.metadata = chunks
         try:
             import faiss
+
             embeddings = embeddings.astype(np.float32)
             faiss.normalize_L2(embeddings)
             self._index = faiss.IndexFlatIP(self.dimension)
@@ -60,6 +62,7 @@ class CodeVectorStore:
             return self._fallback_search(query, k)
 
         import faiss
+
         faiss.normalize_L2(query)
         distances, indices = self._index.search(query, k)
         results: List[Tuple[CodeChunk, float]] = []
@@ -92,6 +95,7 @@ class CodeVectorStore:
         if not self._use_fallback:
             try:
                 import faiss
+
                 faiss.write_index(self._index, str(self.index_path))
             except Exception:
                 pass
@@ -123,6 +127,7 @@ class CodeVectorStore:
         if self.index_path.exists():
             try:
                 import faiss
+
                 self._index = faiss.read_index(str(self.index_path))
                 self._use_fallback = False
                 return True

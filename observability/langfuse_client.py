@@ -27,6 +27,7 @@ class LangfuseClient:
         if self.enabled:
             try:
                 from langfuse import Langfuse as _Langfuse
+
                 self._module = _Langfuse
                 self._langfuse = _Langfuse(
                     public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
@@ -35,9 +36,13 @@ class LangfuseClient:
                 )
             except ImportError:
                 self.enabled = False
-                print("[Langfuse] langfuse package not installed. Install with: pip install langfuse")
+                print(
+                    "[Langfuse] langfuse package not installed. Install with: pip install langfuse"
+                )
         if not self.enabled:
-            print("[Langfuse] Not configured. Set LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST")
+            print(
+                "[Langfuse] Not configured. Set LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST"
+            )
 
     def is_enabled(self) -> bool:
         return self.enabled and self._langfuse is not None

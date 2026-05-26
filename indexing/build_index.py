@@ -3,6 +3,7 @@
 Usage:
     python -m indexing.build_index /path/to/repo [--output path]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -14,7 +15,7 @@ import numpy as np
 
 from indexing.embedder import CodeEmbedder
 from indexing.parser import check_index_staleness, parse_repository
-from indexing.vector_store import CodeVectorStore, DEFAULT_INDEX_PATH
+from indexing.vector_store import DEFAULT_INDEX_PATH, CodeVectorStore
 
 
 def build_index(repo_path: str, output: str = DEFAULT_INDEX_PATH) -> int:
@@ -37,7 +38,9 @@ def build_index(repo_path: str, output: str = DEFAULT_INDEX_PATH) -> int:
     print(f"[INDEX] Building vector index...")
     store = CodeVectorStore(output)
     store.build(chunks, embeddings)
-    print(f"[INDEX] Index saved to {output} ({len(chunks)} chunks, {embeddings.shape[1]} dims)")
+    print(
+        f"[INDEX] Index saved to {output} ({len(chunks)} chunks, {embeddings.shape[1]} dims)"
+    )
     return len(chunks)
 
 
@@ -62,8 +65,12 @@ def ensure_index_built(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build code index for auto-swe-agent")
     parser.add_argument("repo_path", help="Path to repository to index")
-    parser.add_argument("--output", default=DEFAULT_INDEX_PATH, help="Output index path")
-    parser.add_argument("--force", action="store_true", help="Force rebuild even if index exists")
+    parser.add_argument(
+        "--output", default=DEFAULT_INDEX_PATH, help="Output index path"
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="Force rebuild even if index exists"
+    )
     args = parser.parse_args()
 
     if args.force or check_index_staleness(args.repo_path, args.output):

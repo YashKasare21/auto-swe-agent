@@ -7,6 +7,7 @@ Pages:
   - Costs        : cost analysis dashboard
   - System Status: circuit breaker + model health
 """
+
 from __future__ import annotations
 
 import json
@@ -22,7 +23,6 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from ui.state_manager import AgentStateManager
 from ui.components.agent_graph import render_graph
 from ui.components.cost_chart import (
     budget_gauge,
@@ -30,6 +30,7 @@ from ui.components.cost_chart import (
     cost_pie_chart,
     model_usage_stacked_bar,
 )
+from ui.state_manager import AgentStateManager
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -96,7 +97,9 @@ def _model_icon(state: str) -> str:
 
 
 def _status_box(
-    label: str, value: str, color: str = "#6b7280",
+    label: str,
+    value: str,
+    color: str = "#6b7280",
 ) -> str:
     return (
         f'<div style="background:{color}15;border:1px solid {color}40;'
@@ -163,8 +166,11 @@ if page == "🚀 Run Agent":
         )
         budget = st.slider("Budget ($)", 0.0, 20.0, 5.0, 0.5)
         workspace = st.text_input("Workspace", value=str(PROJECT_ROOT))
-        single_agent = st.checkbox("Single-agent mode", value=False,
-                                   help="Use legacy single-agent (planner-only) instead of multi-agent pipeline")
+        single_agent = st.checkbox(
+            "Single-agent mode",
+            value=False,
+            help="Use legacy single-agent (planner-only) instead of multi-agent pipeline",
+        )
 
     col_a, col_b, col_c, col_d = st.columns(4)
     with col_a:
@@ -185,17 +191,16 @@ if page == "🚀 Run Agent":
     # Disable fallback models by setting budget=0 for models we don't want
     fallback_order = FALLBACK_MODELS[:]
     idx = fallback_order.index(model_choice)
-    st.info(
-        f"Fallback chain: **{' → '.join(fallback_order[idx:])}**"
+    st.info(f"Fallback chain: **{' → '.join(fallback_order[idx:])}**")
+
+    run_disabled = not issue.strip() or (
+        st.session_state.agent_process is not None
+        and st.session_state.agent_process.poll() is None
     )
 
-    run_disabled = (
-        not issue.strip()
-        or (st.session_state.agent_process is not None
-            and st.session_state.agent_process.poll() is None)
-    )
-
-    if st.button("▶ Run Agent", type="primary", disabled=run_disabled, use_container_width=True):
+    if st.button(
+        "▶ Run Agent", type="primary", disabled=run_disabled, use_container_width=True
+    ):
         _state_mgr.clear()
         st.session_state.agent_logs = []
         st.session_state.agent_complete = False
@@ -205,12 +210,18 @@ if page == "🚀 Run Agent":
             sys.executable,
             str(PROJECT_ROOT / "agent.py"),
             issue.strip(),
-            "--workspace", workspace,
-            "--budget", str(budget),
-            "--retry-max", str(retry_max),
-            "--retry-delay", str(retry_delay),
-            "--circuit-threshold", str(circuit_threshold),
-            "--circuit-timeout", str(circuit_timeout),
+            "--workspace",
+            workspace,
+            "--budget",
+            str(budget),
+            "--retry-max",
+            str(retry_max),
+            "--retry-delay",
+            str(retry_delay),
+            "--circuit-threshold",
+            str(circuit_threshold),
+            "--circuit-timeout",
+            str(circuit_timeout),
         ]
         if single_agent:
             cmd.append("--single-agent")
@@ -239,11 +250,17 @@ if page == "🚀 Run Agent":
                         st.session_state.agent_logs.append(line.rstrip())
                         # Keep last 200 lines
                         if len(st.session_state.agent_logs) > 200:
-                            st.session_state.agent_logs = st.session_state.agent_logs[-200:]
+                            st.session_state.agent_logs = st.session_state.agent_logs[
+                                -200:
+                            ]
             except (ValueError, OSError):
                 pass
 
-        elapsed = time.time() - st.session_state.agent_start_time if st.session_state.agent_start_time else 0
+        elapsed = (
+            time.time() - st.session_state.agent_start_time
+            if st.session_state.agent_start_time
+            else 0
+        )
         status_area.info(
             f"Running for {_format_time(elapsed)} — "
             f"{len(st.session_state.agent_logs)} log lines captured"
@@ -272,7 +289,9 @@ if page == "🚀 Run Agent":
                 with col2:
                     st.metric("Iterations", final_state.get("iteration_count", 0))
                 with col3:
-                    st.metric("Total Cost", f"${final_state.get('total_cost_usd', 0):.4f}")
+                    st.metric(
+                        "Total Cost", f"${final_state.get('total_cost_usd', 0):.4f}"
+                    )
                 with col4:
                     bn = final_state.get("branch_name") or "—"
                     st.metric("Branch", bn)
@@ -281,7 +300,9 @@ if page == "🚀 Run Agent":
                 if circuit:
                     st.subheader("Circuit Breaker Status")
                     for model, info in circuit.items():
-                        st.write(f"{_model_icon(info['state'])} **{model}** — {info['state']} ({info['failures']} failures)")
+                        st.write(
+                            f"{_model_icon(info['state'])} **{model}** — {info['state']} ({info['failures']} failures)"
+                        )
 
     if st.session_state.agent_complete:
         if st.button("🔄 Clear & New Run", use_container_width=True):
@@ -316,17 +337,26 @@ elif page == "📊 Live Monitor":
 
             # Current agent badge
             agent_colors = {
-                "manager": "#3b82f6", "planner": "#8b5cf6",
-                "coder": "#f59e0b", "reviewer": "#ef4444",
-                "executor": "#10b981", "verify": "#06b6d4",
-                "git_workflow": "#6b7280", None: "#6b7280", "idle": "#6b7280",
+                "manager": "#3b82f6",
+                "planner": "#8b5cf6",
+                "coder": "#f59e0b",
+                "reviewer": "#ef4444",
+                "executor": "#10b981",
+                "verify": "#06b6d4",
+                "git_workflow": "#6b7280",
+                None: "#6b7280",
+                "idle": "#6b7280",
             }
             current_agent = state.get("current_agent") or "idle"
             agent_color = agent_colors.get(current_agent, "#6b7280")
-            agent_label = current_agent.upper().replace("_", " ") if current_agent != "idle" else "IDLE"
+            agent_label = (
+                current_agent.upper().replace("_", " ")
+                if current_agent != "idle"
+                else "IDLE"
+            )
             st.markdown(
                 f'<div style="display:inline-block;background:{agent_color}20;'
-                f'border:2px solid {agent_color};border-radius:20px;padding:6px 18px;'
+                f"border:2px solid {agent_color};border-radius:20px;padding:6px 18px;"
                 f'font-weight:700;font-size:16px;color:{agent_color}">{agent_label}</div>',
                 unsafe_allow_html=True,
             )
@@ -337,10 +367,16 @@ elif page == "📊 Live Monitor":
                 st.metric("Iteration", state.get("iteration_count", 0))
             with k2:
                 tp = state.get("tests_passed")
-                tp_icon = {True: "🟢 Passed", False: "🔴 Failed", None: "🟡 Pending"}.get(tp, "—")
+                tp_icon = {
+                    True: "🟢 Passed",
+                    False: "🔴 Failed",
+                    None: "🟡 Pending",
+                }.get(tp, "—")
                 st.metric("Tests", tp_icon)
             with k3:
-                st.metric("Verification Attempts", state.get("verification_attempts", 0))
+                st.metric(
+                    "Verification Attempts", state.get("verification_attempts", 0)
+                )
             with k4:
                 st.metric("Total Cost", f"${state.get('total_cost_usd', 0):.4f}")
             with k5:
@@ -415,18 +451,21 @@ elif page == "📈 Results":
         col_f1, col_f2, col_f3, col_f4 = st.columns(4)
         with col_f1:
             model_filter = st.multiselect(
-                "Model", options=sorted(df["most_used_model"].dropna().unique()),
+                "Model",
+                options=sorted(df["most_used_model"].dropna().unique()),
             )
         with col_f2:
             status_filter = st.multiselect(
-                "Status", options=["PASS", "FAIL"],
+                "Status",
+                options=["PASS", "FAIL"],
             )
         with col_f3:
             model_filter = model_filter or df["most_used_model"].dropna().unique()
             status_filter = status_filter or ["PASS", "FAIL"]
         with col_f4:
             sort_by = st.selectbox(
-                "Sort by", ["timestamp", "cost", "iterations", "tokens"],
+                "Sort by",
+                ["timestamp", "cost", "iterations", "tokens"],
                 index=0,
             )
 
@@ -447,9 +486,16 @@ elif page == "📈 Results":
 
         # Display table
         display_cols = [
-            "case_id", "passed", "iterations_used", "model_used",
-            "total_cost_usd", "total_tokens", "verification_attempts",
-            "circuit_events", "branch_name", "_file",
+            "case_id",
+            "passed",
+            "iterations_used",
+            "model_used",
+            "total_cost_usd",
+            "total_tokens",
+            "verification_attempts",
+            "circuit_events",
+            "branch_name",
+            "_file",
         ]
         available = [c for c in display_cols if c in filtered.columns]
         st.dataframe(
@@ -498,7 +544,8 @@ elif page == "📈 Results":
             if len(filtered) > 0:
                 usage = filtered["most_used_model"].value_counts()
                 fig = px.pie(
-                    values=usage.values, names=usage.index,
+                    values=usage.values,
+                    names=usage.index,
                     title="Model Usage Distribution",
                 )
                 st.plotly_chart(fig, use_container_width=True)
@@ -541,11 +588,13 @@ elif page == "💰 Costs":
         failed_runs = [r for r in results if not r.get("passed")]
         avg_passed = (
             sum(r.get("total_cost_usd", 0) for r in passed_runs) / len(passed_runs)
-            if passed_runs else 0
+            if passed_runs
+            else 0
         )
         avg_failed = (
             sum(r.get("total_cost_usd", 0) for r in failed_runs) / len(failed_runs)
-            if failed_runs else 0
+            if failed_runs
+            else 0
         )
 
         most_expensive = max(results, key=lambda r: r.get("total_cost_usd", 0))
@@ -571,7 +620,9 @@ elif page == "💰 Costs":
             st.plotly_chart(fig, use_container_width=True)
 
         # Charts
-        tab_c1, tab_c2, tab_c3 = st.tabs(["Run Costs", "By Model", "Cost vs Iterations"])
+        tab_c1, tab_c2, tab_c3 = st.tabs(
+            ["Run Costs", "By Model", "Cost vs Iterations"]
+        )
         with tab_c1:
             df = pd.DataFrame(results)
             fig = cost_bar_chart(
@@ -586,7 +637,9 @@ elif page == "💰 Costs":
             model_breakdown: Dict[str, dict] = {}
             for r in results:
                 m = r.get("most_used_model", "unknown")
-                entry = model_breakdown.setdefault(m, {"calls": 0, "tokens": 0, "cost": 0.0})
+                entry = model_breakdown.setdefault(
+                    m, {"calls": 0, "tokens": 0, "cost": 0.0}
+                )
                 entry["calls"] += 1
                 entry["tokens"] += r.get("total_tokens", 0)
                 entry["cost"] += r.get("total_cost_usd", 0)
@@ -598,8 +651,11 @@ elif page == "💰 Costs":
             if len(results) > 1:
                 df = pd.DataFrame(results)
                 fig = px.scatter(
-                    df, x="total_cost_usd", y="iterations_used",
-                    color="passed", hover_data=["case_id"],
+                    df,
+                    x="total_cost_usd",
+                    y="iterations_used",
+                    color="passed",
+                    hover_data=["case_id"],
                     labels={
                         "total_cost_usd": "Cost (USD)",
                         "iterations_used": "Iterations",
@@ -611,8 +667,12 @@ elif page == "💰 Costs":
         if st.button("📥 Download Cost Data as CSV", use_container_width=True):
             df = pd.DataFrame(results)
             export_cols = [
-                "case_id", "passed", "total_cost_usd", "total_tokens",
-                "iterations_used", "most_used_model",
+                "case_id",
+                "passed",
+                "total_cost_usd",
+                "total_tokens",
+                "iterations_used",
+                "most_used_model",
             ]
             available = [c for c in export_cols if c in df.columns]
             csv = df[available].to_csv(index=False)
@@ -639,14 +699,16 @@ elif page == "🔧 System Status":
 
     circuit = (state or {}).get("circuit_status", {})
     if circuit:
-        cb_df = pd.DataFrame([
-            {
-                "Model": m,
-                "State": info["state"],
-                "Failures": info["failures"],
-            }
-            for m, info in circuit.items()
-        ])
+        cb_df = pd.DataFrame(
+            [
+                {
+                    "Model": m,
+                    "State": info["state"],
+                    "Failures": info["failures"],
+                }
+                for m, info in circuit.items()
+            ]
+        )
         st.dataframe(cb_df, use_container_width=True, hide_index=True)
 
         cols = st.columns(len(circuit))
@@ -686,19 +748,27 @@ elif page == "🔧 System Status":
         for model, outcomes in model_runs.items():
             recent = outcomes[-10:]
             success_rate = sum(recent) / len(recent) * 100 if recent else 0
-            health_data.append({
-                "Model": model,
-                "Runs": len(recent),
-                "Success Rate": f"{success_rate:.0f}%",
-                "Bar": "🟢" if success_rate >= 80 else ("🟡" if success_rate >= 50 else "🔴"),
-            })
+            health_data.append(
+                {
+                    "Model": model,
+                    "Runs": len(recent),
+                    "Success Rate": f"{success_rate:.0f}%",
+                    "Bar": (
+                        "🟢"
+                        if success_rate >= 80
+                        else ("🟡" if success_rate >= 50 else "🔴")
+                    ),
+                }
+            )
 
         if health_data:
             st.dataframe(
                 pd.DataFrame(health_data),
                 use_container_width=True,
                 hide_index=True,
-                column_config={"Bar": st.column_config.TextColumn("Health", width="small")},
+                column_config={
+                    "Bar": st.column_config.TextColumn("Health", width="small")
+                },
             )
     else:
         st.info("No model health data available.")
@@ -709,8 +779,14 @@ elif page == "🔧 System Status":
         total_ce = sum(r.get("circuit_events", 0) for r in results)
         total_runs = len(results)
         st.metric("Total Circuit Events", total_ce)
-        st.metric("Runs with Circuit Events", sum(1 for r in results if r.get("circuit_events", 0) > 0))
-        st.metric("Runs with Open Circuits", sum(1 for r in results if r.get("circuits_open", 0) > 0))
+        st.metric(
+            "Runs with Circuit Events",
+            sum(1 for r in results if r.get("circuit_events", 0) > 0),
+        )
+        st.metric(
+            "Runs with Open Circuits",
+            sum(1 for r in results if r.get("circuits_open", 0) > 0),
+        )
     else:
         st.info("No retry data available.")
 
@@ -718,6 +794,7 @@ elif page == "🔧 System Status":
     st.subheader("🐳 Docker Sandbox")
     try:
         import docker
+
         client = docker.from_env()
         containers = client.containers.list(
             filters={"label": "role=auto-swe-agent-sandbox"},

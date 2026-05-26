@@ -1,6 +1,6 @@
 from langchain_core.messages import SystemMessage
 
-from agents.base import invoke_agent, get_runtime
+from agents.base import get_runtime, invoke_agent
 
 CODER_SYSTEM = """You are a Coder agent — the agent that implements code changes.
 
@@ -34,10 +34,12 @@ You have access to the following tools in two categories:
   use search_codebase only for exact string lookups.
 """
 
-NO_WRITE_MSG = SystemMessage(content=(
-    "You have not written any files yet. You MUST use write_to_file to implement "
-    "the changes before finishing."
-))
+NO_WRITE_MSG = SystemMessage(
+    content=(
+        "You have not written any files yet. You MUST use write_to_file to implement "
+        "the changes before finishing."
+    )
+)
 
 
 def coder_node(state: dict) -> dict:

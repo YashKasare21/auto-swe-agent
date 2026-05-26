@@ -1,10 +1,13 @@
 """Visualise the LangGraph flow with the current node highlighted."""
+
 from __future__ import annotations
 
 from typing import Optional
 
 
-def render_graph(current_node: Optional[str] = None, state: Optional[dict] = None) -> str:
+def render_graph(
+    current_node: Optional[str] = None, state: Optional[dict] = None
+) -> str:
     """Return an HTML+CSS flow diagram as a string.
 
     Supports both single-agent (planner → executor ↔ verify → git)
@@ -52,9 +55,7 @@ def render_graph(current_node: Optional[str] = None, state: Optional[dict] = Non
 
     def _glow(nid: str) -> str:
         return (
-            "box-shadow: 0 0 12px rgba(34,197,94,0.6);"
-            if nid == current_node
-            else ""
+            "box-shadow: 0 0 12px rgba(34,197,94,0.6);" if nid == current_node else ""
         )
 
     node_divs = []
@@ -66,7 +67,7 @@ def render_graph(current_node: Optional[str] = None, state: Optional[dict] = Non
             f'<div style="display:flex;flex-direction:column;align-items:center;'
             f'gap:4px">'
             f'<div style="background:{bg};color:{tc};padding:8px 18px;'
-            f'border-radius:8px;font-weight:600;font-size:14px;'
+            f"border-radius:8px;font-weight:600;font-size:14px;"
             f'transition:all 0.3s ease;{glow}">{label}</div>'
             f"</div>"
         )
@@ -82,9 +83,7 @@ def render_graph(current_node: Optional[str] = None, state: Optional[dict] = Non
                 'text-orientation:mixed;opacity:0.5">↻ loop</div>'
             )
             arrow_divs.append(node_divs[i])
-        arrow_divs.append(
-            '<div style="color:#9ca3af;font-size:20px">→</div>'
-        )
+        arrow_divs.append('<div style="color:#9ca3af;font-size:20px">→</div>')
     arrow_divs.append(node_divs[-1])
 
     html = f"""

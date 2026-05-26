@@ -3,6 +3,7 @@
 Extracts function/class/module chunks with docstrings, signatures, and
 line ranges from Python files. Uses stdlib ``ast`` — no external parser needed.
 """
+
 from __future__ import annotations
 
 import ast
@@ -13,9 +14,21 @@ from typing import List, Optional, Set
 
 # Directories to skip when walking repositories
 IGNORE_DIRS: Set[str] = {
-    ".venv", "venv", "__pycache__", ".git", ".pytest_cache",
-    "node_modules", ".next", ".mypy_cache", ".tox", "build",
-    "dist", "*.egg-info", ".eggs", ".git", "htmlcov",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".git",
+    ".pytest_cache",
+    "node_modules",
+    ".next",
+    ".mypy_cache",
+    ".tox",
+    "build",
+    "dist",
+    "*.egg-info",
+    ".eggs",
+    ".git",
+    "htmlcov",
 }
 
 
@@ -79,17 +92,19 @@ def parse_file(filepath: str) -> List[CodeChunk]:
     # Module-level docstring
     mod_doc = _get_docstring(tree)
     if mod_doc:
-        chunks.append(CodeChunk(
-            file_path=filepath,
-            chunk_type="module",
-            name=path.stem,
-            signature=f"module {path.stem}",
-            docstring=mod_doc,
-            start_line=1,
-            end_line=len(file_text.splitlines()),
-            body_preview=file_text[:500],
-            full_text=file_text,
-        ))
+        chunks.append(
+            CodeChunk(
+                file_path=filepath,
+                chunk_type="module",
+                name=path.stem,
+                signature=f"module {path.stem}",
+                docstring=mod_doc,
+                start_line=1,
+                end_line=len(file_text.splitlines()),
+                body_preview=file_text[:500],
+                full_text=file_text,
+            )
+        )
 
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef):
@@ -98,17 +113,19 @@ def parse_file(filepath: str) -> List[CodeChunk]:
             start = node.lineno
             end = node.end_lineno or start
             preview, full = _chunk_text(file_text, node, start, end)
-            chunks.append(CodeChunk(
-                file_path=filepath,
-                chunk_type="function",
-                name=node.name,
-                signature=sig,
-                docstring=doc,
-                start_line=start,
-                end_line=end,
-                body_preview=preview,
-                full_text=full,
-            ))
+            chunks.append(
+                CodeChunk(
+                    file_path=filepath,
+                    chunk_type="function",
+                    name=node.name,
+                    signature=sig,
+                    docstring=doc,
+                    start_line=start,
+                    end_line=end,
+                    body_preview=preview,
+                    full_text=full,
+                )
+            )
 
         elif isinstance(node, ast.AsyncFunctionDef):
             sig = f"async def {node.name}({', '.join(a.arg for a in node.args.args)}):"
@@ -116,39 +133,42 @@ def parse_file(filepath: str) -> List[CodeChunk]:
             start = node.lineno
             end = node.end_lineno or start
             preview, full = _chunk_text(file_text, node, start, end)
-            chunks.append(CodeChunk(
-                file_path=filepath,
-                chunk_type="function",
-                name=node.name,
-                signature=sig,
-                docstring=doc,
-                start_line=start,
-                end_line=end,
-                body_preview=preview,
-                full_text=full,
-            ))
+            chunks.append(
+                CodeChunk(
+                    file_path=filepath,
+                    chunk_type="function",
+                    name=node.name,
+                    signature=sig,
+                    docstring=doc,
+                    start_line=start,
+                    end_line=end,
+                    body_preview=preview,
+                    full_text=full,
+                )
+            )
 
         elif isinstance(node, ast.ClassDef):
             bases = ", ".join(
-                ast.dumps(b) if isinstance(b, ast.Name) else ""
-                for b in node.bases
+                ast.dumps(b) if isinstance(b, ast.Name) else "" for b in node.bases
             )
             sig = f"class {node.name}({bases})" if bases else f"class {node.name}:"
             doc = _get_docstring(node)
             start = node.lineno
             end = node.end_lineno or start
             preview, full = _chunk_text(file_text, node, start, end)
-            chunks.append(CodeChunk(
-                file_path=filepath,
-                chunk_type="class",
-                name=node.name,
-                signature=sig,
-                docstring=doc,
-                start_line=start,
-                end_line=end,
-                body_preview=preview,
-                full_text=full,
-            ))
+            chunks.append(
+                CodeChunk(
+                    file_path=filepath,
+                    chunk_type="class",
+                    name=node.name,
+                    signature=sig,
+                    docstring=doc,
+                    start_line=start,
+                    end_line=end,
+                    body_preview=preview,
+                    full_text=full,
+                )
+            )
 
     return chunks
 

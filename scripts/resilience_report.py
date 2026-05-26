@@ -2,6 +2,7 @@
 
 Shows retry events, circuit breaker events, and model failure rates per run.
 """
+
 from __future__ import annotations
 
 import json
@@ -111,7 +112,9 @@ def print_report(records: list[dict]) -> None:
     for r in records:
         label = f"{r['_file']} / {r.get('case_id', '?')}"
         status = "PASS" if r.get("passed") else "FAIL"
-        print(f"{label:<45} ${r.get('total_cost_usd', 0):>6.4f} {status:>6} {r.get('circuit_events', 0):>4}")
+        print(
+            f"{label:<45} ${r.get('total_cost_usd', 0):>6.4f} {status:>6} {r.get('circuit_events', 0):>4}"
+        )
 
 
 def _try_chart(records: list[dict]) -> None:

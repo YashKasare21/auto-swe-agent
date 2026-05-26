@@ -1,4 +1,5 @@
 """Diff viewer component for showing before/after file changes."""
+
 from __future__ import annotations
 
 import difflib

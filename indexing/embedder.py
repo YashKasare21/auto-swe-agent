@@ -4,6 +4,7 @@ Embeds code chunks into 384-dim vectors using all-MiniLM-L6-v2.
 Falls back to a simple TF-IDF-like bag-of-words embedding if sentence-transformers
 is unavailable (e.g. on first run before download completes).
 """
+
 from __future__ import annotations
 
 import re
@@ -29,6 +30,7 @@ class CodeEmbedder:
             return
         try:
             from sentence_transformers import SentenceTransformer
+
             self._model = SentenceTransformer(self.model_name)
         except (ImportError, OSError, Exception) as exc:
             warnings.warn(

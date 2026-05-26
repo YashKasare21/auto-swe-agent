@@ -6,6 +6,7 @@ Usage:
     python -m swe_bench.run_swe_bench --instance-ids django__django-11011 django__django-11039
     python -m swe_bench.run_swe_bench --num-tasks 5 --budget 3.0 --single-agent
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,35 +28,46 @@ def main():
         ),
     )
     parser.add_argument(
-        "--num-tasks", type=int, default=10,
+        "--num-tasks",
+        type=int,
+        default=10,
         help="Number of tasks to evaluate (default: 10, use -1 for all)",
     )
     parser.add_argument(
-        "--instance-ids", nargs="+",
+        "--instance-ids",
+        nargs="+",
         help="Specific instance IDs to evaluate (overrides --num-tasks)",
     )
     parser.add_argument(
-        "--budget", type=float, default=5.0,
+        "--budget",
+        type=float,
+        default=5.0,
         help="Dollar budget per agent run (default: 5.0)",
     )
     parser.add_argument(
-        "--single-agent", action="store_true",
+        "--single-agent",
+        action="store_true",
         help="Use single-agent mode instead of multi-agent",
     )
     parser.add_argument(
-        "--agent-timeout", type=int, default=1800,
+        "--agent-timeout",
+        type=int,
+        default=1800,
         help="Agent timeout in seconds per task (default: 1800)",
     )
     parser.add_argument(
-        "--results-dir", default="swe_bench/results",
+        "--results-dir",
+        default="swe_bench/results",
         help="Directory to save results (default: swe_bench/results)",
     )
     parser.add_argument(
-        "--output", default=None,
+        "--output",
+        default=None,
         help="Path to write summary JSON (default: --results-dir/summary.json)",
     )
     parser.add_argument(
-        "--no-cleanup", action="store_true",
+        "--no-cleanup",
+        action="store_true",
         help="Do not remove temporary workspaces after evaluation",
     )
     args = parser.parse_args()
@@ -116,7 +128,9 @@ def print_report(summary: dict) -> None:
                 extra = f" err={r['error'][:40]}"
             elif isinstance(cost, str):
                 extra = " no-cost"
-            print(f"  {iid:<40} {status:<6} {str(cost):>8} {str(tok):>8} {str(elapsed):>7}{extra}")
+            print(
+                f"  {iid:<40} {status:<6} {str(cost):>8} {str(tok):>8} {str(elapsed):>7}{extra}"
+            )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 """Circuit breaker for LLM API calls."""
+
 from __future__ import annotations
 
 import time
@@ -22,7 +23,9 @@ class CircuitBreaker:
         self.last_failure_time[model_name] = time.time()
         if self.failures[model_name] >= self.failure_threshold:
             self.states[model_name] = "open"
-            print(f"[CIRCUIT] {model_name} circuit OPENED after {self.failures[model_name]} failures")
+            print(
+                f"[CIRCUIT] {model_name} circuit OPENED after {self.failures[model_name]} failures"
+            )
 
     def can_call(self, model_name: str) -> bool:
         state = self.states.get(model_name, "closed")
@@ -32,7 +35,9 @@ class CircuitBreaker:
             elapsed = time.time() - self.last_failure_time.get(model_name, 0)
             if elapsed >= self.recovery_timeout:
                 self.states[model_name] = "half-open"
-                print(f"[CIRCUIT] {model_name} circuit HALF-OPEN (recovery timeout elapsed)")
+                print(
+                    f"[CIRCUIT] {model_name} circuit HALF-OPEN (recovery timeout elapsed)"
+                )
                 return True
             return False
         return True  # half-open: allow one probe call

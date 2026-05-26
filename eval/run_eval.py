@@ -1,4 +1,5 @@
 """Eval harness for auto-swe-agent. Runs golden test cases and reports pass/fail."""
+
 from __future__ import annotations
 
 import json
@@ -94,8 +95,12 @@ CASES = [
 
 def _run(cmd: str | list, cwd: str | None = None, timeout: int = 30) -> tuple[int, str]:
     result = subprocess.run(
-        cmd, shell=isinstance(cmd, str), capture_output=True, text=True,
-        timeout=timeout, cwd=cwd
+        cmd,
+        shell=isinstance(cmd, str),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=cwd,
     )
     return result.returncode, (result.stdout + result.stderr).strip()
 
@@ -118,8 +123,13 @@ def _reset_case(case: EvalCase) -> None:
             print(f"  [RESET] Wrote {path}:")
             print("  " + "\n  ".join(BUGGY_MAIN.splitlines()))
             # Verify it's valid Python
-            rc, out = _run([str(VENV_PYTHON), "-c",
-                            f"import ast; ast.parse(open('{path}').read()); print('syntax OK')"])
+            rc, out = _run(
+                [
+                    str(VENV_PYTHON),
+                    "-c",
+                    f"import ast; ast.parse(open('{path}').read()); print('syntax OK')",
+                ]
+            )
             print(f"  [RESET] Syntax check: {out} (exit {rc})")
         else:
             print(f"  [RESET] Running: {cmd}")
@@ -151,8 +161,17 @@ def _pre_validation_check(case: EvalCase) -> None:
 
 def _run_agent(case: EvalCase, timeout: int = 120) -> tuple[int, str]:
     result = subprocess.run(
-        [str(VENV_PYTHON), str(AGENT_DIR / "agent.py"), case.issue, "--workspace", case.workspace],
-        capture_output=True, text=True, timeout=timeout, cwd=str(AGENT_DIR),
+        [
+            str(VENV_PYTHON),
+            str(AGENT_DIR / "agent.py"),
+            case.issue,
+            "--workspace",
+            case.workspace,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=str(AGENT_DIR),
         env={**os.environ},
     )
     return result.returncode, (result.stdout + result.stderr).strip()
@@ -189,6 +208,7 @@ def _extract_meta(output: str) -> tuple:
     for line in output.splitlines():
         if "[SUMMARY]" in line:
             try:
+
                 def _get(key: str) -> str:
                     parts = line.split(f"{key}=")
                     if len(parts) < 2:
@@ -196,7 +216,9 @@ def _extract_meta(output: str) -> tuple:
                     return parts[1].split(" |")[0].strip()
 
                 tp_str = _get("tests_passed")
-                tests_passed = True if tp_str == "True" else (False if tp_str == "False" else None)
+                tests_passed = (
+                    True if tp_str == "True" else (False if tp_str == "False" else None)
+                )
                 verification_attempts = int(_get("verification_attempts"))
                 bn = _get("branch_name")
                 branch_name = None if bn == "None" else bn
@@ -215,10 +237,22 @@ def _extract_meta(output: str) -> tuple:
                 pass
             break
 
-    return (iterations, model, tests_passed, verification_attempts,
-            branch_name, commit_hash, total_cost_usd, total_tokens,
-            most_used_model, circuit_events, circuits_open,
-            semantic_search_calls, lgtm_count, needs_fix_count)
+    return (
+        iterations,
+        model,
+        tests_passed,
+        verification_attempts,
+        branch_name,
+        commit_hash,
+        total_cost_usd,
+        total_tokens,
+        most_used_model,
+        circuit_events,
+        circuits_open,
+        semantic_search_calls,
+        lgtm_count,
+        needs_fix_count,
+    )
 
 
 def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
@@ -262,19 +296,35 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
             print(f"    {line}")
 
         meta = _extract_meta(agent_output)
-        (iterations, model, agent_tests_passed, agent_verification_attempts,
-         branch_name, commit_hash, total_cost_usd, total_tokens,
-         most_used_model, circuit_events, circuits_open,
-         semantic_search_calls, lgtm_count, needs_fix_count) = meta[:14]
+        (
+            iterations,
+            model,
+            agent_tests_passed,
+            agent_verification_attempts,
+            branch_name,
+            commit_hash,
+            total_cost_usd,
+            total_tokens,
+            most_used_model,
+            circuit_events,
+            circuits_open,
+            semantic_search_calls,
+            lgtm_count,
+            needs_fix_count,
+        ) = meta[:14]
 
         agent_trace_id = _extract_langfuse_trace(agent_output)
         if agent_trace_id:
-            print(f"  Langfuse agent trace: {os.getenv('LANGFUSE_HOST', 'https://cloud.langfuse.com')}/trace/{agent_trace_id}")
+            print(
+                f"  Langfuse agent trace: {os.getenv('LANGFUSE_HOST', 'https://cloud.langfuse.com')}/trace/{agent_trace_id}"
+            )
 
         passed = False
         if not error:
             _pre_validation_check(case)
-            val_code, val_out = _run(case.validation_cmd, cwd=case.workspace, timeout=30)
+            val_code, val_out = _run(
+                case.validation_cmd, cwd=case.workspace, timeout=30
+            )
             passed = val_code == 0
             if not passed:
                 error = val_out[:200]
@@ -299,26 +349,28 @@ def run_eval(cases: list[EvalCase] = CASES) -> list[EvalResult]:
                     comment=str(error)[:200],
                 )
 
-        results.append(EvalResult(
-            case_id=case.case_id,
-            passed=passed,
-            iterations_used=iterations,
-            model_used=model,
-            time_taken=elapsed,
-            error=error,
-            tests_passed=agent_tests_passed,
-            verification_attempts=agent_verification_attempts,
-            branch_name=branch_name,
-            commit_hash=commit_hash,
-            total_cost_usd=total_cost_usd,
-            total_tokens=total_tokens,
-            most_used_model=most_used_model,
-            circuit_events=circuit_events,
-            circuits_open=circuits_open,
-            semantic_search_calls=semantic_search_calls,
-            lgtm_count=lgtm_count,
-            needs_fix_count=needs_fix_count,
-        ))
+        results.append(
+            EvalResult(
+                case_id=case.case_id,
+                passed=passed,
+                iterations_used=iterations,
+                model_used=model,
+                time_taken=elapsed,
+                error=error,
+                tests_passed=agent_tests_passed,
+                verification_attempts=agent_verification_attempts,
+                branch_name=branch_name,
+                commit_hash=commit_hash,
+                total_cost_usd=total_cost_usd,
+                total_tokens=total_tokens,
+                most_used_model=most_used_model,
+                circuit_events=circuit_events,
+                circuits_open=circuits_open,
+                semantic_search_calls=semantic_search_calls,
+                lgtm_count=lgtm_count,
+                needs_fix_count=needs_fix_count,
+            )
+        )
 
         if case != cases[-1]:
             print("  [RATE LIMIT] Waiting 30s before next case...")
@@ -332,33 +384,43 @@ def print_report(results: list[EvalResult]) -> None:
     print(f"\n{'='*80}")
     print("EVAL REPORT")
     print(f"{'='*80}")
-    print(f"| {'Case':<28} | {'Result':<6} | {'Iter':>4} | {'Verify':>6} | {'Cost':>8} | "
-          f"{'Tokens':>7} | {'Time':>6} | {'CE':>3} | {'SS':>3} | {'LGTM':>4} | {'NF':>3} |")
-    print(f"|{'-'*30}|{'-'*8}|{'-'*6}|{'-'*8}|{'-'*10}|{'-'*9}|{'-'*8}|{'-'*5}|{'-'*5}|{'-'*6}|{'-'*5}|")
+    print(
+        f"| {'Case':<28} | {'Result':<6} | {'Iter':>4} | {'Verify':>6} | {'Cost':>8} | "
+        f"{'Tokens':>7} | {'Time':>6} | {'CE':>3} | {'SS':>3} | {'LGTM':>4} | {'NF':>3} |"
+    )
+    print(
+        f"|{'-'*30}|{'-'*8}|{'-'*6}|{'-'*8}|{'-'*10}|{'-'*9}|{'-'*8}|{'-'*5}|{'-'*5}|{'-'*6}|{'-'*5}|"
+    )
     for r in results:
         status = "PASS" if r.passed else "FAIL"
         tp = "✓" if r.tests_passed else ("✗" if r.tests_passed is False else "-")
         cost_flag = " !" if r.total_cost_usd > 5.0 else ""
         ce_flag = " !" if r.circuits_open > 0 else ""
-        print(f"| {r.case_id:<28} | {status:<6} | {r.iterations_used:>4} | {tp:>4}/{r.verification_attempts:<1} | "
-              f"${r.total_cost_usd:>6.4f}{cost_flag} | {r.total_tokens:>7} | {r.time_taken:>5.1f}s | "
-              f"{r.circuit_events:>3}{ce_flag} | {r.semantic_search_calls:>3} | "
-              f"{r.lgtm_count:>4} | {r.needs_fix_count:>3} |")
+        print(
+            f"| {r.case_id:<28} | {status:<6} | {r.iterations_used:>4} | {tp:>4}/{r.verification_attempts:<1} | "
+            f"${r.total_cost_usd:>6.4f}{cost_flag} | {r.total_tokens:>7} | {r.time_taken:>5.1f}s | "
+            f"{r.circuit_events:>3}{ce_flag} | {r.semantic_search_calls:>3} | "
+            f"{r.lgtm_count:>4} | {r.needs_fix_count:>3} |"
+        )
     passed = sum(r.passed for r in results)
     total_cost = sum(r.total_cost_usd for r in results)
     total_ce = sum(r.circuit_events for r in results)
     total_ss = sum(r.semantic_search_calls for r in results)
     total_lgtm = sum(r.lgtm_count for r in results)
     total_nf = sum(r.needs_fix_count for r in results)
-    print(f"\n{passed}/{len(results)} passed | Total cost: ${total_cost:.4f} | "
-          f"Total circuit events: {total_ce} | Total semantic searches: {total_ss} | "
-          f"LGTM: {total_lgtm} | NEEDS_FIX: {total_nf}")
+    print(
+        f"\n{passed}/{len(results)} passed | Total cost: ${total_cost:.4f} | "
+        f"Total circuit events: {total_ce} | Total semantic searches: {total_ss} | "
+        f"LGTM: {total_lgtm} | NEEDS_FIX: {total_nf}"
+    )
 
     # Print circuit summary for any case with events
     for r in results:
         if r.circuit_events > 0:
-            print(f"  {r.case_id}: {r.circuit_events} circuit events "
-                  f"({r.circuits_open} circuits still open at end)")
+            print(
+                f"  {r.case_id}: {r.circuit_events} circuit events "
+                f"({r.circuits_open} circuits still open at end)"
+            )
 
 
 def save_results(results: list[EvalResult]) -> Path:
