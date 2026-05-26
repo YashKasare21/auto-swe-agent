@@ -13,6 +13,7 @@ from langgraph.prebuilt import ToolNode
 from tracking.cost_tracker import CostTracker
 from resilience.circuit_breaker import CircuitBreaker
 from resilience.retry import with_retry
+from ui.state_manager import AgentStateManager
 
 docker_client = docker.from_env()
 _sandbox: docker.models.containers.Container = None
@@ -25,6 +26,9 @@ _cost_tracker: CostTracker = CostTracker(budget_usd=5.0)
 # Module-level circuit breaker and event log (reset each run in main()).
 _circuit_breaker: CircuitBreaker = CircuitBreaker(failure_threshold=5, recovery_timeout=300)
 _circuit_events: list[str] = []  # human-readable log of open/close events per run
+
+# Module-level state manager for UI live monitoring (reset at each main()).
+_state_manager: AgentStateManager = AgentStateManager()
 
 
 def get_sandbox(workspace_dir: str) -> docker.models.containers.Container:
@@ -179,6 +183,33 @@ def _is_transient(e: Exception) -> bool:
     )
 
 
+def _export_ui_state(state: dict, node: str = "") -> None:
+    """Export a serialisable subset of GraphState for the Streamlit UI."""
+    cost_summary = _cost_tracker.get_summary()
+    ui_state = {
+        "iteration_count": state.get("iteration_count", 0),
+        "current_node": node or state.get("current_node", "idle"),
+        "tests_passed": state.get("tests_passed"),
+        "verification_attempts": state.get("verification_attempts", 0),
+        "total_cost_usd": cost_summary["total_cost_usd"],
+        "budget_exceeded": state.get("budget_exceeded", False),
+        "total_tokens": cost_summary["total_tokens"],
+        "total_calls": cost_summary["total_calls"],
+        "model_breakdown": cost_summary.get("model_breakdown", {}),
+        "budget_usd": cost_summary.get("budget_usd", 0.0),
+        "last_model_used": state.get("last_model_used", "unknown"),
+        "branch_name": state.get("branch_name"),
+        "commit_hash": state.get("commit_hash"),
+        "messages_count": len(state.get("messages", [])),
+        "circuit_status": _circuit_breaker.get_status(),
+        "circuit_events": _circuit_events[-20:] if _circuit_events else [],
+        "status": "running",
+    }
+    if state.get("budget_exceeded") or node == "end":
+        ui_state["status"] = "completed"
+    _state_manager.save_state(ui_state)
+
+
 def _invoke_model(model: str, msgs: list, max_retries: int, base_delay: float, max_delay: float):
     """Call a single model with exponential backoff on transient errors."""
     @with_retry(
@@ -232,6 +263,9 @@ def planner_node(state: GraphState) -> dict:
             )
             _circuit_breaker.record_success(model)
 
+            # Track last successful model for UI
+            state["last_model_used"] = model
+
             # --- Cost tracking ---
             estimated = False
             usage = getattr(response, "usage_metadata", None) or \
@@ -263,20 +297,26 @@ def planner_node(state: GraphState) -> dict:
                 budget_msg = SystemMessage(
                     content=f"Budget exceeded (${total_cost:.4f} > ${_cost_tracker.budget_usd}). Halting execution."
                 )
-                return {
+                result = {
                     "messages": [response, budget_msg],
                     "iteration_count": state["iteration_count"] + 1,
                     "total_cost_usd": total_cost,
                     "budget_exceeded": True,
                     "tests_passed": False,
+                    "current_node": "planner",
                 }
+                _export_ui_state({**state, **result}, "planner")
+                return result
 
-            return {
+            result = {
                 "messages": [response],
                 "iteration_count": state["iteration_count"] + 1,
                 "total_cost_usd": total_cost,
                 "budget_exceeded": False,
+                "current_node": "planner",
             }
+            _export_ui_state({**state, **result}, "planner")
+            return result
 
         except Exception as e:
             err_name = type(e).__name__
@@ -314,9 +354,11 @@ def _track_tool_calls(state: GraphState) -> dict:
     result = executor_node.invoke(state)
     result["writes_performed"] = writes
     result["search_call_count"] = searches
+    result["current_node"] = "executor"
     # Reset tests_passed to None whenever new files are written, so verify_code re-runs
     if wrote_this_turn:
         result["tests_passed"] = None
+    _export_ui_state({**state, **result}, "executor")
     return result
 
 
@@ -334,21 +376,27 @@ def verify_code(state: GraphState) -> dict:
 
     if exit_code == 0:
         print(f"[VERIFY] Tests PASSED (attempt {attempts})")
-        return {
+        result = {
             "tests_passed": True,
             "test_output": "All tests passed.",
             "verification_attempts": attempts,
+            "current_node": "verify",
         }
+        _export_ui_state({**state, **result}, "verify")
+        return result
     else:
         print(f"[VERIFY] Tests FAILED (attempt {attempts}):\n{output[:300]}")
         # Inject failure message so planner sees the errors on next iteration
         error_msg = SystemMessage(content=f"Tests failed. Fix the following errors:\n{output}")
-        return {
+        result = {
             "tests_passed": False,
             "test_output": output,
             "verification_attempts": attempts,
             "messages": [error_msg],
+            "current_node": "verify",
         }
+        _export_ui_state({**state, **result}, "verify")
+        return result
 
 
 def git_workflow(state: GraphState) -> dict:
@@ -369,13 +417,17 @@ def git_workflow(state: GraphState) -> dict:
     exit_code, _ = _run_in_sandbox("git rev-parse --is-inside-work-tree", workspace)
     if exit_code != 0:
         print("[GIT] Not a git repo — skipping git workflow.")
-        return {"branch_name": None, "commit_hash": None}
+        result = {"branch_name": None, "commit_hash": None, "current_node": "git_workflow"}
+        _export_ui_state({**state, **result}, "git_workflow")
+        return result
 
     # Create branch
     exit_code, out = _run_in_sandbox(f"git checkout -b {branch}", workspace)
     if exit_code != 0:
         print(f"[GIT] Branch creation failed: {out}")
-        return {"branch_name": None, "commit_hash": None}
+        result = {"branch_name": None, "commit_hash": None, "current_node": "git_workflow"}
+        _export_ui_state({**state, **result}, "git_workflow")
+        return result
     print(f"[GIT] Created branch: {branch}")
 
     # Commit all changes
@@ -385,7 +437,9 @@ def git_workflow(state: GraphState) -> dict:
     exit_code, out = _run_in_sandbox(f'git commit -m "{commit_msg}"', workspace)
     if exit_code != 0:
         print(f"[GIT] Commit failed: {out}")
-        return {"branch_name": branch, "commit_hash": None}
+        result = {"branch_name": branch, "commit_hash": None, "current_node": "git_workflow"}
+        _export_ui_state({**state, **result}, "git_workflow")
+        return result
 
     # Parse commit hash
     commit_hash = ""
@@ -396,7 +450,9 @@ def git_workflow(state: GraphState) -> dict:
                 commit_hash = parts[1].rstrip("]")
             break
     print(f"[GIT] Committed: {commit_hash} — {commit_msg}")
-    return {"branch_name": branch, "commit_hash": commit_hash}
+    result = {"branch_name": branch, "commit_hash": commit_hash, "current_node": "git_workflow"}
+    _export_ui_state({**state, **result}, "git_workflow")
+    return result
 
 
 MULTI_FILE_KEYWORDS = ("3 files", "multiple files", "several files", "all files")
@@ -541,6 +597,9 @@ def main():
             print(f"  {ev}")
         if open_circuits:
             print(f"  Circuits still open: {', '.join(open_circuits)}")
+
+    # Export final state for UI (mark as completed)
+    _export_ui_state({**final_state, "status": "completed"}, "end")
 
     # Print SUMMARY line (parsed by eval harness)
     print(f"\n[SUMMARY] tests_passed={final_state.get('tests_passed')} | "
